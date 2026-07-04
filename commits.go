@@ -69,11 +69,26 @@ func (c *Commit) Entry() *FileEntry {
 	return e
 }
 
-// loadCommits lists commits ahead of the upstream (fallback: the last 25)
+// commitRange picks which commits to list: the PR's commits
+// (origin/<base>..HEAD) when an open PR exists and the base ref is
+// available locally, otherwise unpushed commits (@{upstream}..HEAD).
+func commitRange(root string) string {
+	if out, err := runCmd(root, "gh", "pr", "view", "--json", "baseRefName", "--jq", ".baseRefName"); err == nil {
+		if base := strings.TrimSpace(out); base != "" {
+			ref := "origin/" + base
+			if _, err := runCmd(root, "git", "rev-parse", "--verify", "--quiet", ref); err == nil {
+				return ref + "..HEAD"
+			}
+		}
+	}
+	return "@{upstream}..HEAD"
+}
+
+// loadCommits lists the commits of commitRange (fallback: the last 25)
 // and parses each commit's diff.
 func loadCommits(root string, ctx int) ([]*Commit, error) {
 	format := "--format=%H%x1f%s%x1e"
-	out, err := runCmd(root, "git", "log", "--no-merges", format, "@{upstream}..HEAD")
+	out, err := runCmd(root, "git", "log", "--no-merges", format, commitRange(root))
 	if err != nil || strings.TrimSpace(out) == "" {
 		out, err = runCmd(root, "git", "log", "--no-merges", "-25", format, "HEAD")
 		if err != nil {

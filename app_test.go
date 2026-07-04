@@ -911,6 +911,45 @@ func TestSearchInDiff(t *testing.T) {
 	}
 }
 
+func TestCommitsRangeWithRemote(t *testing.T) {
+	root := setupRepo(t)
+	bare := t.TempDir()
+	gitT(t, bare, "init", "-q", "--bare")
+	gitT(t, root, "remote", "add", "origin", bare)
+	gitT(t, root, "push", "-qu", "origin", "HEAD")
+	// one pushed and one unpushed commit on top of init
+	os.WriteFile(filepath.Join(root, "p.txt"), []byte("p\n"), 0o644)
+	gitT(t, root, "add", "p.txt")
+	gitT(t, root, "commit", "-qm", "pushed-a")
+	gitT(t, root, "push", "-q")
+	os.WriteFile(filepath.Join(root, "n.txt"), []byte("n\n"), 0o644)
+	gitT(t, root, "add", "n.txt")
+	gitT(t, root, "commit", "-qm", "unpushed-b")
+
+	commits, err := loadCommits(root, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// no PR (local remote) -> upstream range: only the unpushed commit
+	if len(commits) != 1 || commits[0].Subject != "unpushed-b" {
+		t.Fatalf("want only the unpushed commit, got %d: %+v", len(commits), commits)
+	}
+
+	// the PR range (origin/<base>..HEAD) lists pushed AND unpushed
+	// commits: base branch at the init commit, HEAD two commits ahead
+	initHash, _ := runCmd(root, "git", "rev-list", "--max-parents=0", "HEAD")
+	gitT(t, root, "branch", "base", strings.TrimSpace(initHash))
+	gitT(t, root, "push", "-q", "origin", "base")
+	out, err := runCmd(root, "git", "log", "--no-merges", "--format=%s", "origin/base..HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	subjects := strings.Fields(strings.TrimSpace(out))
+	if len(subjects) != 2 {
+		t.Fatalf("base-range should include pushed and unpushed commits, got %v", subjects)
+	}
+}
+
 func TestSearchInCommits(t *testing.T) {
 	root := setupRepo(t)
 	gitT(t, root, "commit", "-qm", "second commit")

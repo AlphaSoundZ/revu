@@ -25,7 +25,9 @@ blau bei 100 %.
 
 - **LOCAL** (`1`): Gestagte + ungestagte + untracked Dateien des Working
   Trees. Nur gestagte Hunks/Zeilen sind als reviewed markierbar.
-- **COMMITS** (`2`): Commits vor dem Upstream (Fallback: die letzten 25).
+- **COMMITS** (`2`): Bei offenem PR alle Commits des PRs
+  (`origin/<base>..HEAD`, inkl. lokaler noch ungepushter obendrauf);
+  sonst die Commits vor dem Upstream (Fallback: die letzten 25).
   `space` markiert einen ganzen Commit als reviewed — d.h. alle
   Zeilenänderungen des Commits. `enter` öffnet den Dateibaum des Commits,
   in dem man einzelne Dateien und Hunks/Zeilen reviewen kann (`esc` führt
