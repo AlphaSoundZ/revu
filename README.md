@@ -178,6 +178,14 @@ zählen nicht mit. Gedacht für Pre-Commit-Hooks:
 if ! revu check; then exit 1; fi
 ```
 
+## Binärdateien
+
+Binärdateien (Bilder etc.) zählen als eine Review-Einheit: `space`
+toggled die ganze Datei — im Baum wie im Diff (dort steht
+`(binary file)`). Die Review-ID hasht Pfad + Blob-Hash; ändert sich die
+Datei, gilt sie wieder als un-reviewed, und Marks überleben von staged
+bis in den PR-Diff.
+
 ## Hinweise
 
 - Hunks kommen 1:1 aus `git diff` (Unified Format). revu startet mit

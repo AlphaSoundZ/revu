@@ -1273,6 +1273,67 @@ func TestRunCheckIgnoresExcluded(t *testing.T) {
 	}
 }
 
+func TestBinaryReview(t *testing.T) {
+	dir := t.TempDir()
+	gitT(t, dir, "init", "-q")
+	gitT(t, dir, "config", "user.email", "t@t.t")
+	gitT(t, dir, "config", "user.name", "t")
+	os.WriteFile(filepath.Join(dir, "img.png"), []byte{0x89, 0x50, 0x4E, 0x47, 0x00, 0x01}, 0o644)
+	gitT(t, dir, "add", ".")
+	gitT(t, dir, "commit", "-qm", "init")
+	os.WriteFile(filepath.Join(dir, "img.png"), []byte{0x89, 0x50, 0x4E, 0x47, 0x00, 0x02, 0x03}, 0o644)
+	gitT(t, dir, "add", "img.png")
+	real, _ := filepath.EvalSymlinks(dir)
+
+	a := newTestApp(t, real)
+	img := findEntry(a.localFiles, "img.png")
+	if img == nil || !img.Binary || !img.Staged || img.BinaryID == "" {
+		t.Fatalf("staged binary should be reviewable, got %+v", img)
+	}
+	if rev, tot := img.Counts(a.store); rev != 0 || tot != 1 {
+		t.Fatalf("binary should count as one unit, got %d/%d", rev, tot)
+	}
+	// toggle from the tree
+	key(a, " ")
+	if a.status != "" {
+		t.Fatalf("binary toggle should succeed, status=%q", a.status)
+	}
+	if rev, tot := img.Counts(a.store); rev != 1 || tot != 1 {
+		t.Fatalf("binary should be reviewed, got %d/%d", rev, tot)
+	}
+	// toggle from the diff pane works too
+	key(a, "enter")
+	key(a, " ") // un-review
+	key(a, " ") // re-review
+	if rev, _ := img.Counts(a.store); rev != 1 {
+		t.Fatal("diff-pane toggle should work for binaries")
+	}
+
+	// the mark survives commit + re-parse from a branch diff (PR view)
+	gitT(t, real, "commit", "-qm", "update image")
+	out, err := runCmd(real, "git", "diff", "-U1", "--no-color", "HEAD~1", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	files := parseUnifiedDiff(out)
+	if len(files) != 1 || !files[0].Binary {
+		t.Fatalf("re-parse should yield the binary file, got %+v", files)
+	}
+	files[0].Staged = true
+	assignIDs(files[0])
+	if rev, tot := files[0].Counts(a.store); rev != 1 || tot != 1 {
+		t.Fatalf("binary review must survive into the PR diff, got %d/%d", rev, tot)
+	}
+
+	// an unstaged binary change is not reviewable
+	os.WriteFile(filepath.Join(real, "img.png"), []byte{0x89, 0x00}, 0o644)
+	files2, _ := loadLocal(real, 1)
+	img2 := findEntry(files2, "img.png")
+	if _, tot := img2.Counts(a.store); tot != 0 {
+		t.Fatal("unstaged binary must not be reviewable")
+	}
+}
+
 func TestFoldToggle(t *testing.T) {
 	root := setupRepo(t)
 	a := newTestApp(t, root)

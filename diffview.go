@@ -164,11 +164,25 @@ func (d *DiffView) StartVisual() {
 // ToggleReviewed flips review state for the current hunk, line or visual
 // range. Returns a status message when nothing could be toggled.
 func (d *DiffView) ToggleReviewed() string {
-	if d.entry == nil || len(d.sels) == 0 {
+	if d.entry == nil {
 		return ""
 	}
 	if d.entry.Excluded {
 		return "file is excluded from review (.revu/config.json)"
+	}
+	if d.entry.Binary {
+		e := d.entry
+		if !e.Staged || e.BinaryID == "" {
+			return "only staged files can be marked as reviewed"
+		}
+		d.store.Set(e.BinaryID, !d.store.Has(e.BinaryID))
+		if err := d.store.Save(); err != nil {
+			return "failed to save review state: " + err.Error()
+		}
+		return ""
+	}
+	if len(d.sels) == 0 {
+		return ""
 	}
 	if !d.lineMode {
 		h := d.entry.Hunks[d.rows[d.sels[d.cursor]].hunk]
@@ -427,6 +441,9 @@ func (d *DiffView) ensureVisible(h int) {
 func (d *DiffView) rowStyle(r dRow) lipgloss.Style {
 	switch r.kind {
 	case rowInfo:
+		if d.entry.Binary && d.store.Has(d.entry.BinaryID) {
+			return stReviewed
+		}
 		return stDim
 	case rowHunkHeader:
 		h := d.entry.Hunks[r.hunk]

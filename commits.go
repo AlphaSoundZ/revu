@@ -35,6 +35,15 @@ func (c *Commit) ToggleReviewed(st *Store) string {
 	var ids []string
 	all := true
 	for _, f := range c.Files {
+		if f.Excluded {
+			continue
+		}
+		if f.Binary && f.BinaryID != "" {
+			ids = append(ids, f.BinaryID)
+			if !st.Has(f.BinaryID) {
+				all = false
+			}
+		}
 		for _, h := range f.Hunks {
 			for _, l := range h.Lines {
 				if l.Origin == '+' || l.Origin == '-' {

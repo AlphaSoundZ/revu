@@ -59,9 +59,11 @@ type FileEntry struct {
 	Hunks     []*Hunk
 	Binary    bool
 	Untracked bool
-	Staged    bool // has at least one reviewable hunk
-	Status    byte // 'M' modified, 'A' added, 'D' deleted
-	Excluded  bool // matches an exclude pattern; ignored by review accounting
+	Staged    bool   // has at least one reviewable hunk (or is a staged binary)
+	Status    byte   // 'M' modified, 'A' added, 'D' deleted
+	Excluded  bool   // matches an exclude pattern; ignored by review accounting
+	BlobID    string // new-side blob hash from the diff header (binaries)
+	BinaryID  string // synthetic review ID for binary files
 }
 
 // parseUnifiedDiff parses `git diff` / `gh pr diff` output.
@@ -95,8 +97,22 @@ func parseUnifiedDiff(out string) []*FileEntry {
 			cur.Path = strings.TrimPrefix(ln, "+++ b/")
 		case strings.HasPrefix(ln, "--- a/") && cur.Path == "":
 			cur.Path = strings.TrimPrefix(ln, "--- a/")
-		case strings.HasPrefix(ln, "Binary files"):
+		case strings.HasPrefix(ln, "Binary files"), strings.HasPrefix(ln, "GIT binary patch"):
 			cur.Binary = true
+		case strings.HasPrefix(ln, "index "):
+			// "index <old>..<new> <mode>" — keep the new-side blob,
+			// truncated so differing abbreviation widths still match
+			rest := strings.TrimPrefix(ln, "index ")
+			if i := strings.Index(rest, ".."); i >= 0 {
+				blob := rest[i+2:]
+				if j := strings.IndexByte(blob, ' '); j >= 0 {
+					blob = blob[:j]
+				}
+				if len(blob) > 7 {
+					blob = blob[:7]
+				}
+				cur.BlobID = blob
+			}
 		case strings.HasPrefix(ln, "new file mode"):
 			cur.Status = 'A'
 		case strings.HasPrefix(ln, "deleted file mode"):
@@ -115,7 +131,12 @@ func parseUnifiedDiff(out string) []*FileEntry {
 // assignIDs gives every changed line a content-addressed ID. The ID is a
 // hash of (path, origin, text, nth-occurrence), so a line reviewed while
 // staged keeps its mark when the same change later shows up in the PR diff.
+// Binary files get one synthetic ID from path + blob hash instead.
 func assignIDs(f *FileEntry) {
+	if f.Binary {
+		sum := sha1.Sum([]byte(f.Path + "\x00binary\x00" + f.BlobID))
+		f.BinaryID = hex.EncodeToString(sum[:])[:16]
+	}
 	occ := map[string]int{}
 	for _, h := range f.Hunks {
 		for i := range h.Lines {
@@ -136,6 +157,15 @@ func assignIDs(f *FileEntry) {
 func (f *FileEntry) Counts(st *Store) (int, int) {
 	if f.Excluded {
 		return 0, 0
+	}
+	if f.Binary {
+		if !f.Staged || f.BinaryID == "" {
+			return 0, 0
+		}
+		if st.Has(f.BinaryID) {
+			return 1, 1
+		}
+		return 0, 1
 	}
 	rev, tot := 0, 0
 	for _, h := range f.Hunks {
@@ -162,6 +192,12 @@ func (f *FileEntry) ToggleAllReviewed(st *Store) string {
 	}
 	var ids []string
 	all := true
+	if f.Binary && f.Staged && f.BinaryID != "" {
+		ids = append(ids, f.BinaryID)
+		if !st.Has(f.BinaryID) {
+			all = false
+		}
+	}
 	for _, h := range f.Hunks {
 		if !h.Reviewable {
 			continue

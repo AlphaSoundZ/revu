@@ -176,6 +176,9 @@ func loadLocal(root string, ctx int) ([]*FileEntry, error) {
 			if f.Binary {
 				e.Binary = true
 			}
+			if e.BlobID == "" {
+				e.BlobID = f.BlobID // staged side runs first and wins
+			}
 			if reviewable && (len(f.Hunks) > 0 || f.Binary) {
 				e.Staged = true
 			}
