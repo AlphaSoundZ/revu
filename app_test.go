@@ -1223,6 +1223,56 @@ func TestExcludedFiles(t *testing.T) {
 	}
 }
 
+func TestRunCheck(t *testing.T) {
+	root := setupRepo(t)
+	store, _ := LoadStore(root)
+
+	// staged but unreviewed -> fail with a file listing
+	msg, ok := runCheck(root, store)
+	if ok {
+		t.Fatal("check must fail while staged lines are unreviewed")
+	}
+	if !strings.Contains(msg, "0/2") || !strings.Contains(msg, "src/deep/b.txt") {
+		t.Fatalf("report should name the unreviewed file:\n%s", msg)
+	}
+
+	// review everything -> pass
+	a := newTestApp(t, root)
+	key(a, "j")
+	key(a, "j")
+	key(a, " ")
+	msg, ok = runCheck(root, a.store)
+	if !ok {
+		t.Fatalf("check should pass at 100%%:\n%s", msg)
+	}
+
+	// nothing staged -> pass
+	gitT(t, root, "reset", "-q")
+	msg, ok = runCheck(root, a.store)
+	if !ok || !strings.Contains(msg, "nothing staged") {
+		t.Fatalf("check should pass with nothing staged:\n%s", msg)
+	}
+}
+
+func TestRunCheckIgnoresExcluded(t *testing.T) {
+	dir := t.TempDir()
+	gitT(t, dir, "init", "-q")
+	gitT(t, dir, "config", "user.email", "t@t.t")
+	gitT(t, dir, "config", "user.name", "t")
+	os.WriteFile(filepath.Join(dir, "snapshot.json"), []byte("{}\n"), 0o644)
+	gitT(t, dir, "add", ".")
+	gitT(t, dir, "commit", "-qm", "init")
+	os.WriteFile(filepath.Join(dir, "snapshot.json"), []byte("{\"x\":1}\n"), 0o644)
+	gitT(t, dir, "add", ".")
+	real, _ := filepath.EvalSymlinks(dir)
+
+	store, _ := LoadStore(real)
+	msg, ok := runCheck(real, store)
+	if !ok {
+		t.Fatalf("only excluded files staged -> check must pass:\n%s", msg)
+	}
+}
+
 func TestFoldToggle(t *testing.T) {
 	root := setupRepo(t)
 	a := newTestApp(t, root)

@@ -18,6 +18,15 @@ func main() {
 		fmt.Fprintln(os.Stderr, "revu:", err)
 		os.Exit(1)
 	}
+	if len(os.Args) > 1 && os.Args[1] == "check" {
+		msg, ok := runCheck(root, store)
+		if ok {
+			fmt.Println(msg)
+			os.Exit(0)
+		}
+		fmt.Fprintln(os.Stderr, msg)
+		os.Exit(1)
+	}
 	app, err := NewApp(root, store)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "revu:", err)

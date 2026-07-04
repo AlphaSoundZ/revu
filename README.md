@@ -167,6 +167,17 @@ Default:
 Muster ohne `/` matchen den Dateinamen (Glob), Muster mit `/` den Pfad
 relativ zur Repo-Wurzel. Änderungen greifen beim nächsten Reload (`r`).
 
+## `revu check` (Pre-Commit-Gate)
+
+`revu check` prüft ohne UI, ob **alle gestagten Zeilen reviewt** sind:
+Exit-Code 0 bei 100 % (oder wenn nichts gestaged ist), sonst Exit-Code 1
+mit einer Liste der unreviewten Dateien. Excludes aus `.revu/config.json`
+zählen nicht mit. Gedacht für Pre-Commit-Hooks:
+
+```sh
+if ! revu check; then exit 1; fi
+```
+
 ## Hinweise
 
 - Hunks kommen 1:1 aus `git diff` (Unified Format). revu startet mit
