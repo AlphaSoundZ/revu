@@ -5,6 +5,7 @@ import "github.com/charmbracelet/lipgloss"
 var (
 	colStaged      = lipgloss.Color("#29D398") // staged, not yet reviewed
 	colReviewed    = lipgloss.Color("#26BBD9") // reviewed
+	colSkimmed     = lipgloss.Color("#B877DB") // skimmed (überflogen)
 	colUnstaged    = lipgloss.Color("#ECEFF4") // unstaged / untracked
 	colPartial     = lipgloss.Color("#FAB795") // partially reviewed
 	colRemoved     = lipgloss.Color("#E95678") // staged deleted (-) lines
@@ -21,6 +22,7 @@ var (
 
 	stStaged    = lipgloss.NewStyle().Foreground(colStaged)
 	stReviewed  = lipgloss.NewStyle().Foreground(colReviewed)
+	stSkimmed   = lipgloss.NewStyle().Foreground(colSkimmed)
 	stUnstaged  = lipgloss.NewStyle().Foreground(colUnstaged)
 	stPartial   = lipgloss.NewStyle().Foreground(colPartial)
 	stRemoved   = lipgloss.NewStyle().Foreground(colRemoved)
@@ -39,9 +41,13 @@ var (
 )
 
 // dirStyle picks the tree color for a folder from its aggregated content:
-// blue fully reviewed, orange partially, otherwise white.
-func dirStyle(rev, tot int) lipgloss.Style {
+// blue fully reviewed (violet when skimmed marks are among them), orange
+// partially, otherwise white.
+func dirStyle(rev, tot int, skim bool) lipgloss.Style {
 	if tot > 0 && rev == tot {
+		if skim {
+			return stSkimmed.Bold(true)
+		}
 		return stReviewed.Bold(true)
 	}
 	if rev > 0 {
@@ -51,8 +57,9 @@ func dirStyle(rev, tot int) lipgloss.Style {
 }
 
 // fileStyle picks the tree color for a file: gray when nothing is
-// reviewable, green staged, orange partially reviewed, blue fully reviewed.
-func fileStyle(e *FileEntry, rev, tot int) lipgloss.Style {
+// reviewable, green staged, orange partially reviewed, blue fully
+// reviewed (violet when skimmed marks are among them).
+func fileStyle(e *FileEntry, rev, tot int, skim bool) lipgloss.Style {
 	if e.Excluded {
 		return stDim
 	}
@@ -60,6 +67,9 @@ func fileStyle(e *FileEntry, rev, tot int) lipgloss.Style {
 		return stUnstaged
 	}
 	if tot > 0 && rev == tot {
+		if skim {
+			return stSkimmed
+		}
 		return stReviewed
 	}
 	if rev > 0 {

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"strconv"
 	"strings"
 
@@ -20,6 +21,8 @@ type dRow struct {
 	hunk int
 	line int
 	text string
+	oldN int // old-file line number, 0 = not on that side
+	newN int // new-file line number, 0 = not on that side
 }
 
 // DiffView renders one file's diff and tracks the hunk/line cursor,
@@ -37,6 +40,8 @@ type DiffView struct {
 	h         int   // last rendered height, used for paging
 	free      bool  // free-scrolled via J/K; suspends cursor-follow
 	searchRow int   // row of the current search match, -1 when none
+	syntax    bool  // syntax-highlight code lines (H toggles)
+	numW      int   // width of one line-number column
 }
 
 func (d *DiffView) SetEntry(e *FileEntry) {
@@ -63,18 +68,43 @@ func (d *DiffView) rebuild() {
 		d.rows = append(d.rows, dRow{kind: rowInfo, hunk: -1, line: -1, text: "(binary file)"})
 		return
 	}
+	maxN := 1
 	for hi, h := range d.entry.Hunks {
 		d.rows = append(d.rows, dRow{kind: rowHunkHeader, hunk: hi, line: -1, text: h.Header})
 		if !d.lineMode {
 			d.sels = append(d.sels, len(d.rows)-1)
 		}
+		oldN, newN := parseOldStart(h.Header), parseNewStart(h.Header)
+		if oldN == 0 && newN == 0 {
+			oldN, newN = 1, 1 // untracked / FILES preview: synthetic headers
+		}
 		for li, l := range h.Lines {
-			d.rows = append(d.rows, dRow{kind: rowLine, hunk: hi, line: li, text: string(l.Origin) + l.Text})
+			r := dRow{kind: rowLine, hunk: hi, line: li, text: string(l.Origin) + l.Text}
+			switch l.Origin {
+			case '+':
+				r.newN = newN
+				newN++
+			case '-':
+				r.oldN = oldN
+				oldN++
+			default:
+				r.oldN, r.newN = oldN, newN
+				oldN++
+				newN++
+			}
+			if r.oldN > maxN {
+				maxN = r.oldN
+			}
+			if r.newN > maxN {
+				maxN = r.newN
+			}
+			d.rows = append(d.rows, r)
 			if d.lineMode && (l.Origin == '+' || l.Origin == '-') {
 				d.sels = append(d.sels, len(d.rows)-1)
 			}
 		}
 	}
+	d.numW = max(3, len(strconv.Itoa(maxN)))
 	if len(d.sels) == 0 {
 		d.cursor = 0
 	} else {
@@ -162,8 +192,9 @@ func (d *DiffView) StartVisual() {
 }
 
 // ToggleReviewed flips review state for the current hunk, line or visual
-// range. Returns a status message when nothing could be toggled.
-func (d *DiffView) ToggleReviewed() string {
+// range; skim toggles the skimmed mark instead. Returns a status message
+// when nothing could be toggled.
+func (d *DiffView) ToggleReviewed(skim bool) string {
 	if d.entry == nil {
 		return ""
 	}
@@ -175,7 +206,7 @@ func (d *DiffView) ToggleReviewed() string {
 		if !e.Staged || e.BinaryID == "" {
 			return "only staged files can be marked as reviewed"
 		}
-		d.store.Set(e.BinaryID, !d.store.Has(e.BinaryID))
+		d.store.Mark(e.BinaryID, skim, !d.store.In(e.BinaryID, skim))
 		if err := d.store.Save(); err != nil {
 			return "failed to save review state: " + err.Error()
 		}
@@ -191,14 +222,14 @@ func (d *DiffView) ToggleReviewed() string {
 		}
 		all := true
 		for _, l := range h.Lines {
-			if (l.Origin == '+' || l.Origin == '-') && !d.store.Has(l.ID) {
+			if (l.Origin == '+' || l.Origin == '-') && !d.store.In(l.ID, skim) {
 				all = false
 				break
 			}
 		}
 		for _, l := range h.Lines {
 			if l.Origin == '+' || l.Origin == '-' {
-				d.store.Set(l.ID, !all)
+				d.store.Mark(l.ID, skim, !all)
 			}
 		}
 	} else {
@@ -221,7 +252,7 @@ func (d *DiffView) ToggleReviewed() string {
 			}
 			l := h.Lines[r.line]
 			ids = append(ids, l.ID)
-			if !d.store.Has(l.ID) {
+			if !d.store.In(l.ID, skim) {
 				all = false
 			}
 		}
@@ -230,7 +261,7 @@ func (d *DiffView) ToggleReviewed() string {
 			return "only staged lines can be marked as reviewed"
 		}
 		for _, id := range ids {
-			d.store.Set(id, !all)
+			d.store.Mark(id, skim, !all)
 		}
 	}
 	if err := d.store.Save(); err != nil {
@@ -309,7 +340,7 @@ func (d *DiffView) lineNumIn(hunkIdx, lineIdx int) int {
 	h := d.entry.Hunks[hunkIdx]
 	start := parseNewStart(h.Header)
 	if start <= 0 {
-		if d.entry.Untracked {
+		if d.entry.Untracked || d.entry.FileID != "" {
 			start = 1
 		} else {
 			return 0
@@ -438,10 +469,51 @@ func (d *DiffView) ensureVisible(h int) {
 	d.scroll = clamp(d.scroll, 0, maxScroll)
 }
 
+// gutter renders the line-number column: the new-file number, falling
+// back to the old-file number for deleted lines (blank for header/info
+// rows).
+func (d *DiffView) gutter(r dRow) string {
+	n := r.newN
+	if n == 0 {
+		n = r.oldN
+	}
+	s := ""
+	if n > 0 {
+		s = strconv.Itoa(n)
+	}
+	return fmt.Sprintf("%*s ", d.numW, s)
+}
+
+// hunkPath returns the file a row belongs to, for picking a lexer;
+// hunks carry their own path in the commit view.
+func (d *DiffView) hunkPath(r dRow) string {
+	if r.hunk >= 0 && r.hunk < len(d.entry.Hunks) {
+		if fp := d.entry.Hunks[r.hunk].FilePath; fp != "" {
+			return fp
+		}
+	}
+	return d.entry.Path
+}
+
 func (d *DiffView) rowStyle(r dRow) lipgloss.Style {
 	switch r.kind {
 	case rowInfo:
-		if d.entry.Binary && d.store.Has(d.entry.BinaryID) {
+		if d.entry.Binary {
+			if skim, ok := d.store.Permanent(d.entry.Path); ok {
+				if skim {
+					return stSkimmed
+				}
+				return stReviewed
+			}
+		}
+		id := d.entry.BinaryID
+		if d.entry.FileID != "" {
+			id = d.entry.FileID
+		}
+		if d.entry.Binary && d.store.Has(id) {
+			if d.store.Skimmed(id) {
+				return stSkimmed
+			}
 			return stReviewed
 		}
 		return stDim
@@ -450,8 +522,16 @@ func (d *DiffView) rowStyle(r dRow) lipgloss.Style {
 		if !h.Reviewable || d.entry.Excluded {
 			return stDim.Bold(true)
 		}
+		if skim, ok := d.store.Permanent(d.hunkPath(r)); ok {
+			if skim {
+				return stSkimmed.Bold(true)
+			}
+			return stReviewed.Bold(true)
+		}
 		rev, tot := hunkCounts(h, d.store)
 		switch {
+		case tot > 0 && rev == tot && hunkAnySkimmed(h, d.store):
+			return stSkimmed.Bold(true)
 		case tot > 0 && rev == tot:
 			return stReviewed.Bold(true)
 		case rev > 0:
@@ -466,7 +546,18 @@ func (d *DiffView) rowStyle(r dRow) lipgloss.Style {
 			return stContext
 		}
 		reviewable := h.Reviewable && !d.entry.Excluded
+		if reviewable {
+			if skim, ok := d.store.Permanent(d.hunkPath(r)); ok {
+				if skim {
+					return stSkimmed
+				}
+				return stReviewed
+			}
+		}
 		if reviewable && d.store.Has(l.ID) {
+			if d.store.Skimmed(l.ID) {
+				return stSkimmed
+			}
 			return stReviewed
 		}
 		if !reviewable {
@@ -515,12 +606,16 @@ func (d *DiffView) View(w, h int, focused bool, query string) string {
 		}
 		visLo, visHi = d.sels[lo], d.sels[hi]
 	}
+	gutW := d.numW + 1
+	cw := tw - gutW
+	if cw < 8 {
+		gutW, cw = 0, tw // pane too narrow for a gutter
+	}
 	var b strings.Builder
 	end := min(len(d.rows), d.scroll+h)
 	for i := d.scroll; i < end; i++ {
 		r := d.rows[i]
 		st := d.rowStyle(r)
-		text := truncate(expandTabs(r.text), tw)
 		highlight := false
 		if focused {
 			switch {
@@ -535,14 +630,36 @@ func (d *DiffView) View(w, h int, focused bool, query string) string {
 				highlight = true
 			}
 		}
-		if highlight || showBar {
-			text = padRight(text, tw)
+		if gutW > 0 {
+			b.WriteString(st.Render(d.gutter(r)))
 		}
-		hl := stSearch
-		if i == d.searchRow {
-			hl = stSearchCur // the current n/N match
+		text := truncate(expandTabs(r.text), cw)
+		matched := query != "" && strings.Contains(strings.ToLower(text), strings.ToLower(query))
+		// syntax-colored code lines carry their own ANSI sequences, so
+		// cursor/visual background and search highlighting fall back to
+		// the plain state-colored rendering
+		done := false
+		if d.syntax && r.kind == rowLine && !highlight && !matched && text != "" {
+			if code, ok := highlightLine(d.hunkPath(r), text[1:]); ok {
+				b.WriteString(st.Render(text[:1]) + code)
+				if showBar {
+					if pad := cw - len([]rune(text)); pad > 0 {
+						b.WriteString(strings.Repeat(" ", pad))
+					}
+				}
+				done = true
+			}
 		}
-		b.WriteString(highlightMatches(text, query, st, hl))
+		if !done {
+			if highlight || showBar {
+				text = padRight(text, cw)
+			}
+			hl := stSearch
+			if i == d.searchRow {
+				hl = stSearchCur // the current n/N match
+			}
+			b.WriteString(highlightMatches(text, query, st, hl))
+		}
 		if showBar {
 			slot := i - d.scroll
 			if slot >= barTop && slot < barTop+thumbH {

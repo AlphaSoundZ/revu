@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"crypto/sha1"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -231,6 +233,144 @@ func untrackedHunk(abs string) (*Hunk, bool) {
 		h.Lines = append(h.Lines, DLine{Origin: '+', Text: l})
 	}
 	return h, false
+}
+
+// loadFiles lists every file in the repository (tracked and untracked,
+// .gitignore respected) as whole-file review units for the FILES view.
+// The review ID hashes path + blob content, so a mark expires as soon as
+// the file changes — the same content-addressing the line marks use.
+func loadFiles(root string) ([]*FileEntry, error) {
+	out, err := runCmd(root, "git", "ls-files", "-s")
+	if err != nil {
+		return nil, err
+	}
+	blob := map[string]string{}
+	var order []string
+	for _, ln := range strings.Split(strings.TrimSpace(out), "\n") {
+		if ln == "" {
+			continue
+		}
+		// "<mode> <hash> <stage>\t<path>"
+		tab := strings.IndexByte(ln, '\t')
+		if tab < 0 {
+			continue
+		}
+		meta := strings.Fields(ln[:tab])
+		// skip conflict stages and submodule gitlinks
+		if len(meta) != 3 || meta[2] != "0" || meta[0] == "160000" {
+			continue
+		}
+		path := ln[tab+1:]
+		if _, ok := blob[path]; !ok {
+			order = append(order, path)
+		}
+		blob[path] = meta[1]
+	}
+	// worktree differs from the index: the on-disk content is what gets
+	// reviewed, so hash that instead of the index blob
+	dirty := map[string]bool{}
+	if dOut, err := runCmd(root, "git", "diff", "--name-only"); err == nil {
+		for _, p := range strings.Split(strings.TrimSpace(dOut), "\n") {
+			if p != "" {
+				dirty[p] = true
+			}
+		}
+	}
+	untracked := map[string]bool{}
+	if utOut, err := runCmd(root, "git", "ls-files", "--others", "--exclude-standard"); err == nil {
+		for _, p := range strings.Split(strings.TrimSpace(utOut), "\n") {
+			if p == "" {
+				continue
+			}
+			if _, ok := blob[p]; !ok {
+				order = append(order, p)
+			}
+			blob[p] = ""
+			dirty[p] = true
+			untracked[p] = true
+		}
+	}
+	sort.Strings(order)
+	var files []*FileEntry
+	for _, p := range order {
+		h := blob[p]
+		if dirty[p] {
+			var err error
+			if h, err = blobHash(filepath.Join(root, p)); err != nil {
+				continue // deleted from the worktree
+			}
+		}
+		status := byte(' ')
+		switch {
+		case untracked[p]:
+			status = 'A'
+		case dirty[p]:
+			status = 'M'
+		}
+		e := &FileEntry{Path: p, Status: status, Staged: true}
+		sum := sha1.Sum([]byte(p + "\x00file\x00" + h))
+		e.FileID = hex.EncodeToString(sum[:])[:16]
+		files = append(files, e)
+	}
+	return files, nil
+}
+
+// fileHistoryIDs collects the review IDs of every past change to the
+// file. Each commit's diff is parsed separately so the occurrence
+// counting — and therefore the IDs — match the scheme loadCommits uses.
+// The IDs hash only changed lines, so -U0 is safe and fast. Errors (e.g.
+// an empty repository) just mean no history.
+func fileHistoryIDs(root, path string) []string {
+	out, err := runCmd(root, "git", "log", "--no-merges", "--format=%x1e",
+		"-p", "-U0", "--no-color", "--no-ext-diff", "--", path)
+	if err != nil {
+		return nil
+	}
+	var ids []string
+	for _, chunk := range strings.Split(out, "\x1e") {
+		for _, f := range parseUnifiedDiff(chunk) {
+			assignIDs(f)
+			ids = append(ids, entryIDs(f)...)
+		}
+	}
+	return ids
+}
+
+// blobHash computes git's blob hash of the file's on-disk content.
+func blobHash(abs string) (string, error) {
+	data, err := os.ReadFile(abs)
+	if err != nil {
+		return "", err
+	}
+	h := sha1.New()
+	fmt.Fprintf(h, "blob %d\x00", len(data))
+	h.Write(data)
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+// ensurePreview lazily loads a file's content as a context-only hunk so
+// the FILES view can show it in the diff pane.
+func ensurePreview(root string, e *FileEntry) {
+	if e == nil || e.FileID == "" || e.Binary || len(e.Hunks) > 0 {
+		return
+	}
+	data, err := os.ReadFile(filepath.Join(root, e.Path))
+	if err != nil {
+		return
+	}
+	if bytes.IndexByte(data, 0) >= 0 {
+		e.Binary = true
+		return
+	}
+	lines := strings.Split(strings.TrimSuffix(string(data), "\n"), "\n")
+	if len(lines) > 5000 {
+		lines = lines[:5000]
+	}
+	h := &Hunk{Header: fmt.Sprintf("@@ %s (%d lines) @@", e.Path, len(lines))}
+	for _, l := range lines {
+		h.Lines = append(h.Lines, DLine{Origin: ' ', Text: l})
+	}
+	e.Hunks = []*Hunk{h}
 }
 
 type PRInfo struct {

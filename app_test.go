@@ -62,6 +62,8 @@ func key(a *App, k string) {
 		msg = tea.KeyMsg{Type: tea.KeyCtrlU}
 	case "ctrl+o":
 		msg = tea.KeyMsg{Type: tea.KeyCtrlO}
+	case "ctrl+@":
+		msg = tea.KeyMsg{Type: tea.KeyCtrlAt}
 	default:
 		msg = tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(k)}
 	}
@@ -173,7 +175,7 @@ func TestLineModeAndVisual(t *testing.T) {
 		t.Fatalf("want 1/2 reviewed, got %d/%d", rev, tot)
 	}
 	// partial state -> file style should be partial (orange)
-	if st := fileStyle(a.diff.entry, rev, tot); st.GetForeground() != colPartial {
+	if st := fileStyle(a.diff.entry, rev, tot, false); st.GetForeground() != colPartial {
 		t.Fatal("partially reviewed file should be orange")
 	}
 
@@ -192,7 +194,7 @@ func TestLineModeAndVisual(t *testing.T) {
 	if a.diff.visual {
 		t.Fatal("space should exit visual mode")
 	}
-	if st := fileStyle(a.diff.entry, rev, tot); st.GetForeground() != colReviewed {
+	if st := fileStyle(a.diff.entry, rev, tot, false); st.GetForeground() != colReviewed {
 		t.Fatal("fully reviewed file should be blue")
 	}
 }
@@ -274,6 +276,73 @@ func TestTreeSpaceTogglesWholeFile(t *testing.T) {
 	}
 	if rev, _ := findEntry(a.localFiles, "a.txt").Counts(a.store); rev != 0 {
 		t.Fatal("unstaged file must not be reviewable")
+	}
+}
+
+func TestSkimToggle(t *testing.T) {
+	root := setupRepo(t)
+	a := newTestApp(t, root)
+	key(a, "j")
+	key(a, "j") // src/deep/b.txt
+	e := findEntry(a.localFiles, "src/deep/b.txt")
+
+	// S in the tree skims the whole file: counts as done, styled violet
+	key(a, "S")
+	rev, tot := e.Counts(a.store)
+	if rev != tot || tot == 0 {
+		t.Fatalf("skim should count as done, got %d/%d", rev, tot)
+	}
+	if !e.AnySkimmed(a.store) {
+		t.Fatal("file should report skimmed lines")
+	}
+	if st := fileStyle(e, rev, tot, true); st.GetForeground() != colSkimmed {
+		t.Fatal("skimmed file should be violet")
+	}
+	msg, ok := runCheck(root, a.store)
+	if !ok {
+		t.Fatalf("skimmed lines must pass revu check:\n%s", msg)
+	}
+
+	// space promotes skimmed to reviewed instead of clearing
+	key(a, " ")
+	if e.AnySkimmed(a.store) {
+		t.Fatal("space should promote skimmed lines to reviewed")
+	}
+	if rev, tot := e.Counts(a.store); rev != tot {
+		t.Fatalf("promotion must keep the file done, got %d/%d", rev, tot)
+	}
+
+	// S downgrades reviewed to skimmed, second S clears
+	key(a, "S")
+	if !e.AnySkimmed(a.store) {
+		t.Fatal("S should downgrade reviewed lines to skimmed")
+	}
+	key(a, "S")
+	if rev, _ := e.Counts(a.store); rev != 0 {
+		t.Fatalf("second S should clear all marks, got %d", rev)
+	}
+
+	// ctrl+@ (= ctrl+space) is an alias for S, also in the diff pane
+	key(a, "enter")
+	key(a, "ctrl+@")
+	if !e.AnySkimmed(a.store) {
+		t.Fatal("ctrl+space in the diff should skim the hunk")
+	}
+	d := a.diff
+	for _, r := range d.rows {
+		if r.kind != rowLine {
+			continue
+		}
+		if d.entry.Hunks[r.hunk].Lines[r.line].Origin != ' ' &&
+			d.rowStyle(r).GetForeground() != colSkimmed {
+			t.Fatal("skimmed diff line should be violet")
+		}
+	}
+
+	// the skim mark persists like a review mark
+	store2, _ := LoadStore(root)
+	if !e.AnySkimmed(store2) {
+		t.Fatal("skim marks should persist in reviewed.json")
 	}
 }
 
@@ -514,12 +583,19 @@ func TestViewCyclingAndTabs(t *testing.T) {
 		t.Fatalf("] from COMMITS should go to PR, got %v", a.view)
 	}
 	key(a, "]")
+	if a.view != viewFiles {
+		t.Fatalf("] from PR should go to FILES, got %v", a.view)
+	}
+	if !strings.Contains(a.View(), "[FILES]") {
+		t.Fatal("active FILES view should be bracketed")
+	}
+	key(a, "]")
 	if a.view != viewLocal {
 		t.Fatal("] should wrap around to LOCAL")
 	}
 	key(a, "[")
-	if a.view != viewPR {
-		t.Fatal("[ from LOCAL should wrap to PR")
+	if a.view != viewFiles {
+		t.Fatal("[ from LOCAL should wrap to FILES")
 	}
 	key(a, "1")
 	if a.view != viewLocal {
@@ -1059,7 +1135,7 @@ func TestFolderColors(t *testing.T) {
 	if tot != 2 || rev != 0 {
 		t.Fatalf("src/ should aggregate 0/2, got %d/%d", rev, tot)
 	}
-	if dirStyle(rev, tot).GetForeground() != colUnstaged {
+	if dirStyle(rev, tot, false).GetForeground() != colUnstaged {
 		t.Fatal("unreviewed folder should be white")
 	}
 	// one of two lines reviewed -> orange
@@ -1072,7 +1148,7 @@ func TestFolderColors(t *testing.T) {
 	if rev != 1 {
 		t.Fatalf("want 1 reviewed line, got %d", rev)
 	}
-	if dirStyle(rev, tot).GetForeground() != colPartial {
+	if dirStyle(rev, tot, false).GetForeground() != colPartial {
 		t.Fatal("partially reviewed folder should be orange")
 	}
 	// all reviewed -> blue
@@ -1082,7 +1158,7 @@ func TestFolderColors(t *testing.T) {
 	if rev != tot {
 		t.Fatalf("want all reviewed, got %d/%d", rev, tot)
 	}
-	if dirStyle(rev, tot).GetForeground() != colReviewed {
+	if dirStyle(rev, tot, false).GetForeground() != colReviewed {
 		t.Fatal("fully reviewed folder should be blue")
 	}
 }
@@ -1349,5 +1425,288 @@ func TestFoldToggle(t *testing.T) {
 	key(a, "l") // expand again
 	if len(a.localTree.rows) != rowsBefore {
 		t.Fatal("expanding src/ should restore children")
+	}
+}
+
+func TestFilesView(t *testing.T) {
+	root := setupRepo(t)
+	os.MkdirAll(filepath.Join(root, "app"), 0o755)
+	os.WriteFile(filepath.Join(root, "app/x.txt"), []byte("x\n"), 0o644)
+	a := newTestApp(t, root)
+
+	_, cmd := a.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("4")})
+	if a.view != viewFiles || !a.filesLoading {
+		t.Fatal("4 should switch to FILES and start loading")
+	}
+	if cmd == nil {
+		t.Fatal("switching to FILES should return a load cmd")
+	}
+	a.Update(cmd())
+	if a.filesErr != "" {
+		t.Fatal("files load failed:", a.filesErr)
+	}
+	if len(a.allFiles) != 4 {
+		t.Fatalf("want 4 files, got %d", len(a.allFiles))
+	}
+	if e := findEntry(a.allFiles, "a.txt"); e == nil || e.Status != 'M' {
+		t.Fatalf("a.txt has unstaged changes, want status M, got %+v", e)
+	}
+	if e := findEntry(a.allFiles, "untracked.txt"); e == nil || e.Status != 'A' {
+		t.Fatalf("untracked.txt should have status A, got %+v", e)
+	}
+	if e := findEntry(a.allFiles, "src/deep/b.txt"); e == nil || e.Status != ' ' {
+		t.Fatalf("b.txt worktree matches the index, want blank status, got %+v", e)
+	}
+
+	// folders start collapsed, only app/ is open:
+	// rows: app/ x.txt src/ a.txt untracked.txt
+	if got := len(a.filesTree.rows); got != 5 {
+		t.Fatalf("want 5 rows (all collapsed except app/), got %d", got)
+	}
+	if r := a.filesTree.rows[0].node; r.Path != "app" || !r.Expanded {
+		t.Fatalf("app/ should be the first row and expanded, got %+v", r)
+	}
+	if r := a.filesTree.rows[2].node; r.Path != "src" || r.Expanded {
+		t.Fatalf("src/ should be collapsed, got %+v", r)
+	}
+	key(a, "j")
+	key(a, "j") // src/
+	key(a, "l") // expand
+	key(a, "j") // src/deep/
+	key(a, "l") // expand
+	key(a, "j") // src/deep/b.txt
+	n := a.filesTree.Current()
+	if n == nil || n.Path != "src/deep/b.txt" {
+		t.Fatalf("cursor should be on src/deep/b.txt, got %+v", n)
+	}
+	// the diff pane previews the file content as context lines
+	if a.diff.entry == nil || len(a.diff.entry.Hunks) != 1 {
+		t.Fatal("FILES view should preview the file in the diff pane")
+	}
+	for _, l := range a.diff.entry.Hunks[0].Lines {
+		if l.Origin != ' ' {
+			t.Fatalf("preview lines must be context, got %q", l.Origin)
+		}
+	}
+
+	// marking the file reviews its current version...
+	key(a, " ")
+	b := n.Entry
+	if rev, tot := b.Counts(a.store); rev != 1 || tot != 1 {
+		t.Fatalf("file mark: want 1/1, got %d/%d", rev, tot)
+	}
+	// ...including the staged local change...
+	lb := findEntry(a.localFiles, "src/deep/b.txt")
+	if rev, tot := lb.Counts(a.store); rev != tot || tot == 0 {
+		t.Fatalf("local staged lines should be reviewed, got %d/%d", rev, tot)
+	}
+	// ...and every commit that led to it, but not other files' lines
+	a.Update(loadCommitsCmd(root, 1)())
+	if a.commitsErr != "" {
+		t.Fatal("commits load failed:", a.commitsErr)
+	}
+	init := a.commits[len(a.commits)-1]
+	cb := findEntry(init.Files, "src/deep/b.txt")
+	if rev, tot := cb.Counts(a.store); rev != tot || tot != 3 {
+		t.Fatalf("b.txt lines of the init commit should be reviewed, got %d/%d", rev, tot)
+	}
+	ca := findEntry(init.Files, "a.txt")
+	if rev, _ := ca.Counts(a.store); rev != 0 {
+		t.Fatalf("a.txt must stay unreviewed, got %d reviewed", rev)
+	}
+
+	// a change after the mark invalidates it
+	os.WriteFile(filepath.Join(root, "src/deep/b.txt"), []byte("later\n"), 0o644)
+	a.Update(loadFilesCmd(root)())
+	b2 := findEntry(a.allFiles, "src/deep/b.txt")
+	if rev, tot := b2.Counts(a.store); rev != 0 || tot != 1 {
+		t.Fatalf("changed file must lose its mark, got %d/%d", rev, tot)
+	}
+	// the already reviewed history stays reviewed
+	if rev, tot := cb.Counts(a.store); rev != tot {
+		t.Fatalf("history marks must survive the change, got %d/%d", rev, tot)
+	}
+
+	// unmarking clears file + history marks again
+	os.WriteFile(filepath.Join(root, "src/deep/b.txt"), []byte("line1\nCHANGED\nline3\n"), 0o644)
+	a.Update(loadFilesCmd(root)())
+	a.syncDiff()
+	key(a, " ")
+	if rev, _ := findEntry(a.allFiles, "src/deep/b.txt").Counts(a.store); rev != 0 {
+		t.Fatal("second toggle should clear the file mark")
+	}
+	if rev, _ := cb.Counts(a.store); rev != 0 {
+		t.Fatal("second toggle should clear the history marks")
+	}
+}
+
+func TestLineNumbersAndSyntaxToggle(t *testing.T) {
+	root := setupRepo(t)
+	a := newTestApp(t, root)
+	key(a, "j")
+	key(a, "j")
+	key(a, "enter") // src/deep/b.txt, focus diff
+
+	// -U1 hunk: @@ -1,3 +1,3 @@  line1 / -line2 / +CHANGED / line3
+	want := []struct{ o, n int }{{0, 0}, {1, 1}, {2, 0}, {0, 2}, {3, 3}}
+	if len(a.diff.rows) != len(want) {
+		t.Fatalf("want %d rows, got %d", len(want), len(a.diff.rows))
+	}
+	for i, w := range want {
+		r := a.diff.rows[i]
+		if r.oldN != w.o || r.newN != w.n {
+			t.Fatalf("row %d: want %d/%d, got %d/%d", i, w.o, w.n, r.oldN, r.newN)
+		}
+	}
+
+	if !a.diff.syntax {
+		t.Fatal("syntax highlighting should default to on")
+	}
+	key(a, "H")
+	if a.diff.syntax {
+		t.Fatal("H should turn syntax highlighting off")
+	}
+	// plain rendering shows the single-column gutter inline with the text
+	view := a.View()
+	if !strings.Contains(view, "  1  line1") {
+		t.Fatal("context line should carry the new-file line number")
+	}
+	if !strings.Contains(view, "  2 -line2") {
+		t.Fatal("removed line should fall back to the old-file number")
+	}
+	if !strings.Contains(view, "  2 +CHANGED") {
+		t.Fatal("added line should carry the new-file number")
+	}
+	key(a, "H")
+	if !a.diff.syntax {
+		t.Fatal("H should turn syntax highlighting back on")
+	}
+}
+
+func TestMarkPopup(t *testing.T) {
+	root := setupRepo(t)
+	a := newTestApp(t, root)
+
+	// m on the src/ folder opens the popup
+	n := a.localTree.Current()
+	if n == nil || n.Path != "src" {
+		t.Fatalf("cursor should be on src/, got %+v", n)
+	}
+	key(a, "m")
+	if !a.markOpen || a.markNode != n || a.markSel != 0 {
+		t.Fatal("m should open the mark popup on src/")
+	}
+	if !strings.Contains(a.View(), "permanently reviewed") {
+		t.Fatal("popup should list the permanent options")
+	}
+	if !strings.Contains(a.View(), "[LOCAL]") {
+		t.Fatal("popup should overlay the screen, keeping the background visible")
+	}
+
+	// esc closes without applying
+	key(a, "j")
+	key(a, "esc")
+	if a.markOpen {
+		t.Fatal("esc should close the popup")
+	}
+	b := findEntry(a.localFiles, "src/deep/b.txt")
+	if rev, _ := b.Counts(a.store); rev != 0 {
+		t.Fatal("cancelled popup must not mark anything")
+	}
+
+	// option 3 (permanently reviewed) on the folder
+	key(a, "m")
+	key(a, "j")
+	key(a, "j")
+	if a.markSel != 2 {
+		t.Fatalf("j j should select option 3, got %d", a.markSel)
+	}
+	key(a, "enter")
+	if a.markOpen {
+		t.Fatal("enter should close the popup")
+	}
+	if !a.store.PermanentAt("src", false) {
+		t.Fatal("enter should set the permanent mark on src")
+	}
+	if rev, tot := b.Counts(a.store); rev != tot || tot != 2 {
+		t.Fatalf("permanent folder mark should count b.txt reviewed, got %d/%d", rev, tot)
+	}
+	if b.AnySkimmed(a.store) {
+		t.Fatal("permanently reviewed must not read as skimmed")
+	}
+	// the permanent mark survives content changes: no line IDs involved
+	if len(a.store.Lines) != 0 {
+		t.Fatal("permanent marks must not touch line marks")
+	}
+	if !strings.Contains(a.View(), "src/ ∞") {
+		t.Fatal("tree should flag the permanently marked folder with ∞")
+	}
+	if !strings.Contains(a.View(), "b.txt  2/2 ∞") {
+		t.Fatal("files under a permanent folder should inherit the ∞ flag")
+	}
+
+	// popup shows the active option; selecting it again removes it
+	key(a, "m")
+	key(a, "j")
+	key(a, "j")
+	if a.markState(n) != 2 {
+		t.Fatal("active permanent mark should be flagged in the popup")
+	}
+	key(a, "enter")
+	if a.store.PermanentAt("src", false) {
+		t.Fatal("re-selecting should clear the permanent mark")
+	}
+	if rev, _ := b.Counts(a.store); rev != 0 {
+		t.Fatal("clearing the permanent mark should drop the counts")
+	}
+
+	// option 4: permanent skim on a single file
+	key(a, "j")
+	key(a, "j") // src/deep/b.txt
+	key(a, "m")
+	key(a, "k") // wraps to the last option
+	key(a, "enter")
+	if !a.store.PermanentAt("src/deep/b.txt", true) {
+		t.Fatal("option 4 should set the permanent skim mark on the file")
+	}
+	if !b.AnySkimmed(a.store) {
+		t.Fatal("permanently skimmed file should read as skimmed")
+	}
+	a.store.SetPermanent("src/deep/b.txt", true, false)
+
+	// option 1 (reviewed) on the folder marks all staged lines under it
+	key(a, "g")
+	key(a, "m")
+	key(a, "enter")
+	if rev, tot := b.Counts(a.store); rev != tot || tot != 2 {
+		t.Fatalf("folder review should mark b.txt's staged lines, got %d/%d", rev, tot)
+	}
+	if len(a.store.Lines) != 2 {
+		t.Fatalf("folder review should use line marks, got %d", len(a.store.Lines))
+	}
+
+	// single-select: a permanent mark shadows the content marks...
+	key(a, "m")
+	key(a, "j")
+	key(a, "j")
+	key(a, "enter") // permanently reviewed on src/
+	if got := a.markState(n); got != 2 {
+		t.Fatalf("permanent mark should be the single active state, got %d", got)
+	}
+	// ...and switching back to "reviewed" replaces the permanent mark
+	key(a, "m")
+	key(a, "enter")
+	if a.store.PermanentAt("src", false) {
+		t.Fatal("choosing reviewed should clear the permanent mark")
+	}
+	if got := a.markState(n); got != 0 {
+		t.Fatalf("reviewed should be the single active state, got %d", got)
+	}
+
+	// the help popup is an overlay too
+	key(a, "?")
+	view := a.View()
+	if !strings.Contains(view, "revu · keybindings") || !strings.Contains(view, "[LOCAL]") {
+		t.Fatal("help should overlay the screen, keeping the background visible")
 	}
 }

@@ -19,6 +19,7 @@ const (
 	viewLocal viewKind = iota
 	viewCommits
 	viewPR
+	viewFiles
 	viewCount
 )
 
@@ -43,6 +44,11 @@ type prMsg struct {
 type commitsMsg struct {
 	commits []*Commit
 	err     error
+}
+
+type filesMsg struct {
+	files []*FileEntry
+	err   error
 }
 
 type editorDoneMsg struct{}
@@ -73,8 +79,14 @@ type App struct {
 	commitsLoading bool
 	commitsErr     string
 
+	allFiles     []*FileEntry
+	filesLoaded  bool
+	filesLoading bool
+	filesErr     string
+
 	localTree  *TreeModel
 	prTree     *TreeModel
+	filesTree  *TreeModel
 	commitList *CommitList
 	commitOpen *Commit    // commit drilled into via enter, nil = list
 	commitTree *TreeModel // file tree of commitOpen
@@ -85,6 +97,10 @@ type App struct {
 	context  int // -U<n> context lines around changes
 	cfg      Config
 
+	markOpen bool  // mark popup (m) is showing
+	markNode *Node // file or folder the popup is about
+	markSel  int   // selected option
+
 	searching   bool   // search bar open, typing
 	searchInput string // text being typed
 	searchQuery string // active query (highlights, n/N)
@@ -92,7 +108,7 @@ type App struct {
 
 func NewApp(root string, store *Store) (*App, error) {
 	a := &App{root: root, store: store, context: defaultContext}
-	a.diff = &DiffView{store: store}
+	a.diff = &DiffView{store: store, syntax: true}
 	files, err := loadLocal(root, a.context)
 	if err != nil {
 		a.localErr = err.Error()
@@ -127,6 +143,13 @@ func loadCommitsCmd(root string, ctx int) tea.Cmd {
 	}
 }
 
+func loadFilesCmd(root string) tea.Cmd {
+	return func() tea.Msg {
+		files, err := loadFiles(root)
+		return filesMsg{files, err}
+	}
+}
+
 func rebuildTree(old *TreeModel, files []*FileEntry) *TreeModel {
 	var exp map[string]bool
 	cur := ""
@@ -158,6 +181,8 @@ func (a *App) activeTree() *TreeModel {
 		return a.prTree
 	case viewCommits:
 		return a.commitTree // nil while the commit list is shown
+	case viewFiles:
+		return a.filesTree
 	}
 	return a.localTree
 }
@@ -181,6 +206,9 @@ func (a *App) syncDiff() {
 	if n == nil || n.IsDir {
 		a.diff.SetEntry(nil)
 		return
+	}
+	if a.view == viewFiles {
+		ensurePreview(a.root, n.Entry)
 	}
 	a.diff.SetEntry(n.Entry)
 }
@@ -251,6 +279,25 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.syncDiff()
 		}
 		return a, nil
+	case filesMsg:
+		a.filesLoading = false
+		a.filesLoaded = true
+		if msg.err != nil {
+			a.filesErr = msg.err.Error()
+			return a, nil
+		}
+		a.filesErr = ""
+		a.applyExcludes(msg.files)
+		a.allFiles = msg.files
+		first := a.filesTree == nil
+		a.filesTree = rebuildTree(a.filesTree, msg.files)
+		if first {
+			a.filesTree.CollapseAll("app")
+		}
+		if a.view == viewFiles {
+			a.syncDiff()
+		}
+		return a, nil
 	case editorDoneMsg:
 		return a, a.refreshCmd()
 	case tea.MouseMsg:
@@ -308,6 +355,9 @@ func (a *App) refreshCmd() tea.Cmd {
 	case viewCommits:
 		a.commitsLoading = true
 		return loadCommitsCmd(a.root, a.context)
+	case viewFiles:
+		a.filesLoading = true
+		return loadFilesCmd(a.root)
 	}
 	return loadLocalCmd(a.root, a.context)
 }
@@ -325,6 +375,9 @@ func (a *App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		a.showHelp = false
 		return a, nil
 	}
+	if a.markOpen {
+		return a.handleMarkKey(key)
+	}
 	switch key {
 	case "ctrl+c", "q":
 		return a, tea.Quit
@@ -339,6 +392,14 @@ func (a *App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return a, nil
 	case "ctrl+o":
 		a.copyReviewPrompt()
+		return a, nil
+	case "H":
+		a.diff.syntax = !a.diff.syntax
+		if a.diff.syntax {
+			a.status = "syntax highlighting on"
+		} else {
+			a.status = "syntax highlighting off"
+		}
 		return a, nil
 	case "ctrl+d", "pgdown":
 		a.diff.Scroll(max(1, a.diff.h/2))
@@ -360,6 +421,8 @@ func (a *App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return a.switchView(viewCommits)
 	case "3":
 		return a.switchView(viewPR)
+	case "4":
+		return a.switchView(viewFiles)
 	case "+", "=":
 		a.full = !a.full
 		return a, nil
@@ -424,7 +487,13 @@ func (a *App) handleCommitsKey(key string) (tea.Model, tea.Cmd) {
 		}
 	case " ", "space":
 		if c := cl.Current(); c != nil {
-			if m := c.ToggleReviewed(a.store); m != "" {
+			if m := c.ToggleReviewed(a.store, false); m != "" {
+				a.status = m
+			}
+		}
+	case "S", "ctrl+@":
+		if c := cl.Current(); c != nil {
+			if m := c.ToggleReviewed(a.store, true); m != "" {
 				a.status = m
 			}
 		}
@@ -443,6 +512,10 @@ func (a *App) switchView(v viewKind) (tea.Model, tea.Cmd) {
 	if v == viewCommits && !a.commitsLoaded && !a.commitsLoading {
 		a.commitsLoading = true
 		cmd = loadCommitsCmd(a.root, a.context)
+	}
+	if v == viewFiles && !a.filesLoaded && !a.filesLoading {
+		a.filesLoading = true
+		cmd = loadFilesCmd(a.root)
 	}
 	a.syncDiff()
 	return a, cmd
@@ -623,7 +696,7 @@ func (a *App) handleTreeKey(key string) (tea.Model, tea.Cmd) {
 			t.SelectPath(dir)
 			a.syncDiff()
 		}
-	case " ", "space":
+	case " ", "space", "S", "ctrl+@":
 		n := t.Current()
 		if n == nil {
 			break
@@ -632,8 +705,18 @@ func (a *App) handleTreeKey(key string) (tea.Model, tea.Cmd) {
 			a.status = "select a file to toggle its review state"
 			break
 		}
-		if m := n.Entry.ToggleAllReviewed(a.store); m != "" {
+		if a.view == viewFiles {
+			a.toggleWholeFile(n.Entry, key != " " && key != "space")
+			break
+		}
+		if m := n.Entry.ToggleAllReviewed(a.store, key != " " && key != "space"); m != "" {
 			a.status = m
+		}
+	case "m":
+		if n := t.Current(); n != nil {
+			a.markOpen = true
+			a.markNode = n
+			a.markSel = 0
 		}
 	case "esc":
 		if a.view == viewCommits && a.commitOpen != nil {
@@ -666,6 +749,185 @@ func (a *App) handleTreeKey(key string) (tea.Model, tea.Cmd) {
 		return a, loadLocalCmd(a.root, a.context)
 	}
 	return a, nil
+}
+
+// wholeFileIDs returns every ID a FILES-view mark covers. Marking a file
+// means "the version on disk is reviewed", which covers every change
+// that led to it: the line IDs of all commits touching the file plus the
+// current local (and loaded PR/commit) diff lines, alongside the file
+// ID. Later changes hash to new IDs and stay unreviewed.
+func (a *App) wholeFileIDs(e *FileEntry) []string {
+	ids := append([]string{e.FileID}, fileHistoryIDs(a.root, e.Path)...)
+	byPath := func(files []*FileEntry) *FileEntry {
+		for _, f := range files {
+			if f.Path == e.Path {
+				return f
+			}
+		}
+		return nil
+	}
+	ids = append(ids, entryIDs(byPath(a.localFiles))...)
+	ids = append(ids, entryIDs(byPath(a.prFiles))...)
+	for _, c := range a.commits {
+		ids = append(ids, entryIDs(byPath(c.Files))...)
+	}
+	return ids
+}
+
+// toggleWholeFile flips the FILES-view mark for a file.
+func (a *App) toggleWholeFile(e *FileEntry, skim bool) {
+	if e == nil || e.FileID == "" {
+		return
+	}
+	if e.Excluded {
+		a.status = "file is excluded from review (.revu/config.json)"
+		return
+	}
+	v := !a.store.In(e.FileID, skim)
+	for _, id := range a.wholeFileIDs(e) {
+		a.store.Mark(id, skim, v)
+	}
+	if err := a.store.Save(); err != nil {
+		a.status = "failed to save review state: " + err.Error()
+	}
+}
+
+// markAllIn reports whether every markable unit under the node already
+// carries the given mark (and whether there is anything markable).
+func (a *App) markAllIn(n *Node, skim bool) bool {
+	any := false
+	for _, e := range entriesUnder(n) {
+		if e.Excluded {
+			continue
+		}
+		if a.view == viewFiles {
+			if e.FileID == "" {
+				continue
+			}
+			any = true
+			if !a.store.In(e.FileID, skim) {
+				return false
+			}
+			continue
+		}
+		for _, id := range reviewableIDs(e) {
+			any = true
+			if !a.store.In(id, skim) {
+				return false
+			}
+		}
+	}
+	return any
+}
+
+// applyMark executes a mark-popup choice for a file or folder node:
+// 0 reviewed, 1 skimmed (content-addressed, like space/S on a file),
+// 2/3 the permanent variants (path-based, survive content changes).
+// Choosing an already-active option removes the mark again.
+func (a *App) applyMark(n *Node, opt int) {
+	if n == nil {
+		return
+	}
+	skim := opt == 1 || opt == 3
+	if opt >= 2 {
+		a.store.SetPermanent(n.Path, skim, !a.store.PermanentAt(n.Path, skim))
+	} else {
+		v := !a.markAllIn(n, skim)
+		if a.store.PermanentAt(n.Path, false) || a.store.PermanentAt(n.Path, true) {
+			v = true // switching from a permanent mark: set, don't toggle off
+			a.store.SetPermanent(n.Path, skim, false)
+		}
+		var ids []string
+		for _, e := range entriesUnder(n) {
+			if e.Excluded {
+				continue
+			}
+			if a.view == viewFiles {
+				ids = append(ids, a.wholeFileIDs(e)...)
+			} else {
+				ids = append(ids, reviewableIDs(e)...)
+			}
+		}
+		if len(ids) == 0 {
+			a.status = "nothing markable here (only staged changes count)"
+			return
+		}
+		for _, id := range ids {
+			a.store.Mark(id, skim, v)
+		}
+	}
+	if err := a.store.Save(); err != nil {
+		a.status = "failed to save review state: " + err.Error()
+	}
+}
+
+var markOptions = []struct{ label, desc string }{
+	{"reviewed", "expires when the content changes"},
+	{"skimmed", "read over; expires when the content changes"},
+	{"permanently reviewed", "for generated files/dirs, implicitly reviewed; survives any change"},
+	{"permanently skimmed", "for files/dirs with limited impact, safe to approve; survives any change"},
+}
+
+func (a *App) handleMarkKey(key string) (tea.Model, tea.Cmd) {
+	switch key {
+	case "ctrl+c":
+		return a, tea.Quit
+	case "esc", "q", "m":
+		a.markOpen = false
+	case "j", "down":
+		a.markSel = (a.markSel + 1) % len(markOptions)
+	case "k", "up":
+		a.markSel = (a.markSel + len(markOptions) - 1) % len(markOptions)
+	case "enter", " ", "space":
+		a.markOpen = false
+		a.applyMark(a.markNode, a.markSel)
+	}
+	return a, nil
+}
+
+// markState returns the option currently in effect for the node, -1 for
+// none. Exactly one state is reported: permanent marks shadow content
+// marks, so the popup reads as a single-select menu.
+func (a *App) markState(n *Node) int {
+	switch {
+	case a.store.PermanentAt(n.Path, true):
+		return 3
+	case a.store.PermanentAt(n.Path, false):
+		return 2
+	case a.markAllIn(n, true):
+		return 1
+	case a.markAllIn(n, false):
+		return 0
+	}
+	return -1
+}
+
+func (a *App) markView() string {
+	n := a.markNode
+	name := n.Path
+	if n.IsDir {
+		name += "/"
+	}
+	state := a.markState(n)
+	var b strings.Builder
+	for i, o := range markOptions {
+		cursor, st := "  ", stContext
+		if i == a.markSel {
+			cursor, st = "▸ ", stTitle
+		}
+		check := "  "
+		if i == state {
+			check = "✓ "
+		}
+		b.WriteString(cursor + stReviewed.Render(check) + st.Render(padRight(o.label, 22)) +
+			stDim.Render(o.desc) + "\n")
+	}
+	b.WriteString("\n" + stDim.Render("j/k select · enter confirm · esc cancel"))
+	return lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(colBorderF).
+		Padding(1, 3).
+		Render(stTitle.Render("mark "+truncate(name, 48)) + "\n\n" + b.String())
 }
 
 func anyStagedUnder(n *Node) bool {
@@ -704,8 +966,12 @@ func (a *App) handleDiffKey(key string) (tea.Model, tea.Cmd) {
 		d.ToggleMode()
 	case "v":
 		d.StartVisual()
-	case " ", "space":
-		if m := d.ToggleReviewed(); m != "" {
+	case " ", "space", "S", "ctrl+@":
+		if a.view == viewFiles && d.entry != nil && d.entry.FileID != "" {
+			a.toggleWholeFile(d.entry, key != " " && key != "space")
+			break
+		}
+		if m := d.ToggleReviewed(key != " " && key != "space"); m != "" {
 			a.status = m
 		}
 	case "s":
@@ -910,9 +1176,6 @@ func (a *App) View() string {
 	if a.w == 0 || a.h == 0 {
 		return ""
 	}
-	if a.showHelp {
-		return a.helpView()
-	}
 	paneH := a.h - 1
 	var body string
 	if a.full {
@@ -931,12 +1194,19 @@ func (a *App) View() string {
 			a.renderDiffPane(a.w-tw, paneH),
 		)
 	}
-	return body + "\n" + a.statusBar()
+	screen := body + "\n" + a.statusBar()
+	switch {
+	case a.showHelp:
+		return overlay(screen, a.helpView(), a.w, a.h)
+	case a.markOpen:
+		return overlay(screen, a.markView(), a.w, a.h)
+	}
+	return screen
 }
 
 // viewTabs renders all view names, bracketing the active one.
 func (a *App) viewTabs(maxW int) string {
-	labels := []string{"LOCAL", "COMMITS", "PR"}
+	labels := []string{"LOCAL", "COMMITS", "PR", "FILES"}
 	if a.prInfo != nil {
 		labels[viewPR] = fmt.Sprintf("PR #%d", a.prInfo.Number)
 	}
@@ -984,6 +1254,8 @@ func (a *App) reviewProgress() (int, int) {
 			tot += t
 		}
 		return rev, tot
+	case viewFiles:
+		return sum(a.allFiles)
 	}
 	return sum(a.localFiles)
 }
@@ -1028,6 +1300,12 @@ func (a *App) renderTreePane(w, h int) string {
 		content = stStatusMsg.Render(truncate(a.commitsErr, innerW))
 	case a.view == viewCommits && a.commitList == nil:
 		content = stDim.Render("(no commits)")
+	case a.view == viewFiles && a.filesLoading:
+		content = stDim.Render("loading files…")
+	case a.view == viewFiles && a.filesErr != "":
+		content = stStatusMsg.Render(truncate(a.filesErr, innerW))
+	case a.view == viewFiles && a.filesTree == nil:
+		content = stDim.Render("(no files)")
 	case a.view == viewCommits && a.commitOpen == nil:
 		content = a.commitList.View(innerW, innerH-1, a.store, a.focus == focusTree, a.searchQuery)
 	default:
@@ -1049,6 +1327,9 @@ func (a *App) renderDiffPane(w, h int) string {
 		if a.diff.visual {
 			mode = "visual"
 		}
+		if e.FileID != "" {
+			mode = "file"
+		}
 		extra := ""
 		if tot > 0 {
 			extra = fmt.Sprintf(" · %d/%d reviewed", rev, tot)
@@ -1062,6 +1343,8 @@ func (a *App) renderDiffPane(w, h int) string {
 		content = stDim.Render("loading PR…")
 	case a.view == viewCommits && a.commitsLoading:
 		content = stDim.Render("loading commits…")
+	case a.view == viewFiles && a.filesLoading:
+		content = stDim.Render("loading files…")
 	default:
 		content = a.diff.View(innerW, innerH-1, a.focus == focusDiff, a.searchQuery)
 	}
@@ -1096,11 +1379,12 @@ func (a *App) helpView() string {
 		binds []bind
 	}{
 		{"Global", []bind{
-			{"[ / ]", "cycle views (LOCAL / COMMITS / PR)"},
-			{"1 / 2 / 3", "jump to a view directly"},
+			{"[ / ]", "cycle views (LOCAL / COMMITS / PR / FILES)"},
+			{"1 / 2 / 3 / 4", "jump to a view directly"},
 			{"J / K", "scroll the diff pane (from anywhere)"},
 			{"ctrl+d / ctrl+u", "half-page scroll the diff (from anywhere)"},
 			{"ctrl+o", "copy review prompt (file; + line range in diff)"},
+			{"H", "toggle syntax highlighting in the diff"},
 			{"{ / }", "shrink / grow diff context by one line"},
 			{"/", "search (enter: confirm, esc: cancel)"},
 			{"n / N", "next / previous search match"},
@@ -1116,19 +1400,28 @@ func (a *App) helpView() string {
 			{"h / l", "collapse / expand folder, h jumps to parent"},
 			{"enter", "toggle folder / open file (focus diff)"},
 			{"space", "toggle review for the whole file"},
+			{"S / ctrl+space", "toggle skimmed for the whole file"},
+			{"m", "mark menu for file or folder (incl. permanent marks)"},
 			{"s", "stage / unstage file or folder"},
 			{"g / G", "top / bottom"},
+		}},
+		{"Files view", []bind{
+			{"4", "full repository tree; every file is one review unit"},
+			{"space", "mark the current version reviewed, incl. all past changes"},
+			{"S / ctrl+space", "same, but skimmed"},
 		}},
 		{"Commit list", []bind{
 			{"j / k", "move (diff preview follows)"},
 			{"enter", "open the commit's file tree (esc: back)"},
 			{"space", "toggle review for the whole commit"},
+			{"S / ctrl+space", "toggle skimmed for the whole commit"},
 		}},
 		{"Diff", []bind{
 			{"j / k", "move through hunks (or lines)"},
 			{"a", "toggle hunk ↔ line mode"},
 			{"v", "visual multi-line select"},
 			{"space", "toggle reviewed"},
+			{"S / ctrl+space", "toggle skimmed (read over, makes sense)"},
 			{"s", "stage / unstage hunk or selected lines"},
 			{"esc", "leave visual (back to hunk mode) / back to tree"},
 			{"g / G", "top / bottom"},
@@ -1146,12 +1439,11 @@ func (a *App) helpView() string {
 		}
 	}
 	b.WriteString("\n" + stDim.Render("press any key to close"))
-	box := lipgloss.NewStyle().
+	return lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(colBorderF).
 		Padding(1, 3).
 		Render(stTitle.Render("revu · keybindings") + "\n\n" + strings.TrimRight(b.String(), "\n"))
-	return lipgloss.Place(a.w, a.h, lipgloss.Center, lipgloss.Center, box)
 }
 
 func (a *App) statusBar() string {
@@ -1164,11 +1456,13 @@ func (a *App) statusBar() string {
 	var hints string
 	switch {
 	case a.focus == focusTree && a.view == viewCommits && a.commitOpen == nil:
-		hints = "j/k move · enter files · space review commit · [/] view · + zoom · ? help · q quit"
+		hints = "j/k move · enter files · space review commit · S skim · [/] view · + zoom · ? help · q quit"
+	case a.focus == focusTree && a.view == viewFiles:
+		hints = "j/k move · h/l fold · enter open · space review file · S skim · m mark · e edit · [/] view · + zoom · ? help · q quit"
 	case a.focus == focusTree:
-		hints = "j/k move · h/l fold · enter open · space review · s stage · e edit · [/] view · + zoom · ? help · q quit"
+		hints = "j/k move · h/l fold · enter open · space review · S skim · m mark · s stage · e edit · [/] view · + zoom · ? help · q quit"
 	default:
-		hints = "j/k move · a hunk/line · v visual · space review · s stage · e edit · esc back · ? help · q quit"
+		hints = "j/k move · a hunk/line · v visual · space review · S skim · s stage · e edit · esc back · ? help · q quit"
 	}
 	viewName := "LOCAL"
 	switch a.view {
@@ -1176,6 +1470,8 @@ func (a *App) statusBar() string {
 		viewName = "COMMITS"
 	case viewPR:
 		viewName = "PR"
+	case viewFiles:
+		viewName = "FILES"
 	}
 	search := ""
 	if a.searchQuery != "" {

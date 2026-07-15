@@ -65,6 +65,22 @@ func sortNode(n *Node) {
 	}
 }
 
+// entriesUnder collects the file entries of a node's subtree (or the
+// node's own entry for a file).
+func entriesUnder(n *Node) []*FileEntry {
+	if !n.IsDir {
+		if n.Entry == nil {
+			return nil
+		}
+		return []*FileEntry{n.Entry}
+	}
+	var out []*FileEntry
+	for _, c := range n.Children {
+		out = append(out, entriesUnder(c)...)
+	}
+	return out
+}
+
 // nodeCounts aggregates reviewed/total reviewable lines over a subtree.
 func nodeCounts(n *Node, store *Store) (int, int) {
 	if !n.IsDir {
@@ -80,6 +96,20 @@ func nodeCounts(n *Node, store *Store) (int, int) {
 		tot += t
 	}
 	return rev, tot
+}
+
+// nodeAnySkimmed reports whether any counted line in the subtree is
+// marked as skimmed.
+func nodeAnySkimmed(n *Node, store *Store) bool {
+	if !n.IsDir {
+		return n.Entry != nil && n.Entry.AnySkimmed(store)
+	}
+	for _, c := range n.Children {
+		if nodeAnySkimmed(c, store) {
+			return true
+		}
+	}
+	return false
 }
 
 type treeRow struct {
@@ -212,6 +242,29 @@ func (t *TreeModel) reveal(target *Node) {
 	}
 }
 
+// CollapseAll folds every folder, then re-expands the named top-level
+// paths. The FILES view starts this way: everything closed, app/ open.
+func (t *TreeModel) CollapseAll(expand ...string) {
+	var walk func(n *Node)
+	walk = func(n *Node) {
+		for _, c := range n.Children {
+			if c.IsDir {
+				c.Expanded = false
+				walk(c)
+			}
+		}
+	}
+	walk(t.root)
+	for _, p := range expand {
+		for _, c := range t.root.Children {
+			if c.IsDir && c.Path == p {
+				c.Expanded = true
+			}
+		}
+	}
+	t.flatten()
+}
+
 func (t *TreeModel) ExpandedMap() map[string]bool {
 	m := map[string]bool{}
 	var walk func(n *Node)
@@ -253,17 +306,20 @@ func (t *TreeModel) View(w, h int, store *Store, focused bool, query string) str
 				arrow = "▾"
 			}
 			rev, tot := nodeCounts(r.node, store)
-			st = dirStyle(rev, tot)
+			st = dirStyle(rev, tot, nodeAnySkimmed(r.node, store))
 			label = fmt.Sprintf("%s%s %s/", prefix, arrow, r.node.Name)
 		} else {
 			e := r.node.Entry
 			rev, tot := e.Counts(store)
-			st = fileStyle(e, rev, tot)
+			st = fileStyle(e, rev, tot, e.AnySkimmed(store))
 			suffix := ""
-			if tot > 0 {
+			if tot > 0 && e.FileID == "" { // whole-file units: the color says it all
 				suffix = fmt.Sprintf("  %d/%d", rev, tot)
 			}
 			label = fmt.Sprintf("%s%2s %s%s", prefix, e.StatusMarker(), r.node.Name, suffix)
+		}
+		if _, ok := store.Permanent(r.node.Path); ok {
+			label += " ∞" // permanently marked (set here or on a parent)
 		}
 		label = truncate(expandTabs(label), w)
 		if i == t.cursor {

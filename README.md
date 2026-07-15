@@ -17,11 +17,11 @@ Voraussetzungen: `git`, für die PR-View ein authentifiziertes `gh`.
 ## Views
 
 Oben links sind immer alle Views sichtbar; die aktive steht in Klammern
-(z.B. `[LOCAL] · COMMITS · PR`). Mit `[`/`]` wird durchgewechselt.
+(z.B. `[LOCAL] · COMMITS · PR · FILES`). Mit `[`/`]` wird durchgewechselt.
 Oben rechts zeigt eine Prozentanzeige den Review-Fortschritt der aktiven
 View (LOCAL: gestagte Zeilen, COMMITS: alle gelisteten Commits bzw. der
-geöffnete Commit, PR: der PR-Diff) — grau bei 0 %, orange dazwischen,
-blau bei 100 %.
+geöffnete Commit, PR: der PR-Diff, FILES: Anteil markierter Dateien) —
+grau bei 0 %, orange dazwischen, blau bei 100 %.
 
 - **LOCAL** (`1`): Gestagte + ungestagte + untracked Dateien des Working
   Trees. Nur gestagte Hunks/Zeilen sind als reviewed markierbar.
@@ -34,6 +34,32 @@ blau bei 100 %.
   zurück zur Commit-Liste).
 - **PR** (`3`): Der Diff des offenen PRs für den aktuellen Branch.
   Alles ist markierbar.
+- **FILES** (`4`): Der komplette Dateibaum des Repos (tracked +
+  untracked, `.gitignore` wird beachtet). Alle Ordner starten
+  eingeklappt; nur ein Top-Level-Ordner `app` wird, falls vorhanden,
+  automatisch aufgeklappt. Jede Datei ist eine Review-Einheit; rechts
+  wird ihr Inhalt als Vorschau angezeigt.
+  `space` markiert die **aktuelle Version** der Datei als reviewed —
+  und damit logischerweise auch alle Änderungen, die zu ihr geführt
+  haben: die Zeilen aller früheren Commits an dieser Datei (plus
+  aktuelle staged/unstaged Änderungen) gelten in den anderen Views
+  ebenfalls als reviewed. Alles, was **danach** geändert wird, bekommt
+  neue IDs und ist wieder un-reviewed; auch die Datei-Markierung selbst
+  hasht Pfad + Inhalt und verfällt bei der nächsten Änderung. Erneutes
+  `space` entfernt die Markierung samt der History-Marks wieder.
+
+Neben „reviewed" (`space`) gibt es „überflogen" (`S` oder `ctrl+space`):
+ich habe den Code gelesen und er ergibt Sinn, aber ich habe ihn nicht
+selbst geschrieben. Überflogene Zeilen zählen wie reviewte in den
+Fortschritt und in `revu check`, werden aber violett statt blau
+angezeigt. `space` auf überflogenen Zeilen stuft sie zu reviewed hoch,
+`S` auf reviewten Zeilen stuft sie zu überflogen herab; die zweite
+gleiche Taste entfernt die Markierung wieder.
+
+> **Warum nicht Shift+Space?** Terminals senden für Shift+Space exakt
+> dasselbe Byte wie für Space — die Kombination ist für ein TUI nicht
+> unterscheidbar (dafür bräuchte es das Kitty-Keyboard-Protokoll, das
+> Bubble Tea v1 nicht unterstützt). `ctrl+space` kommt dem am nächsten.
 
 Review-Markierungen sind content-adressiert (Hash aus Pfad + Zeileninhalt).
 Eine Zeile, die im gestagten Zustand reviewt wurde, bleibt nach Commit und
@@ -46,6 +72,7 @@ Push im PR-Diff reviewed. Der State liegt in `.revu/reviewed.json` im Repo
 | -------------------- | -------------------- |
 | gestaged             | grün `#29D398`       |
 | reviewed             | blau `#26BBD9`       |
+| überflogen (skimmed) | violett `#B877DB`    |
 | unstaged / untracked / Kontext | grau/weiß `#ECEFF4` |
 | teilweise reviewed   | orange `#FAB795`     |
 | entfernte Zeilen (−), staged | rot `#E95678` |
@@ -65,11 +92,12 @@ blau = komplett reviewt, grau = nur unstaged/untracked.
 
 | Taste       | Aktion                                        |
 | ----------- | --------------------------------------------- |
-| `[` / `]`   | Durch die Views wechseln (LOCAL / COMMITS / PR) |
-| `1` `2` `3` | Direkt zu einer View springen                 |
+| `[` / `]`   | Durch die Views wechseln (LOCAL / COMMITS / PR / FILES) |
+| `1` `2` `3` `4` | Direkt zu einer View springen             |
 | `J` / `K` (shift) | Diff-Fenster scrollen (aus jeder View) |
 | `ctrl+d` / `ctrl+u` | Diff halbe Seite scrollen (aus jeder View, auch PgDn/PgUp) |
 | `ctrl+o`    | Review-Prompt kopieren (im Diff mit Zeilenbereich) |
+| `H`         | Syntax-Highlighting im Diff togglen           |
 | `/`         | Suchen (enter: bestätigen, esc: abbrechen)    |
 | `n` / `N`   | Nächster / vorheriger Treffer                 |
 | `<` / `>`   | An den Anfang / ans Ende springen             |
@@ -88,6 +116,8 @@ blau = komplett reviewt, grau = nur unstaged/untracked.
 | `h` / `l` | Ordner ein-/ausklappen, `h` springt zum Elternordner |
 | `enter`   | Ordner togglen bzw. Datei öffnen (fokussiert Diff) |
 | `space`   | Ganze Datei als reviewed togglen         |
+| `S` / `ctrl+space` | Ganze Datei als überflogen togglen |
+| `m`       | Markier-Menü für Datei **oder Ordner** öffnen |
 | `s`       | Datei / Ordner stagen bzw. unstagen (Toggle) |
 | `g` / `G` | Anfang / Ende                            |
 
@@ -98,6 +128,7 @@ blau = komplett reviewt, grau = nur unstaged/untracked.
 | `j` / `k` | Navigieren (Diff-Vorschau folgt)         |
 | `enter`   | Dateibaum des Commits öffnen (`esc`: zurück) |
 | `space`   | Ganzen Commit als reviewed togglen       |
+| `S` / `ctrl+space` | Ganzen Commit als überflogen togglen |
 
 ### Diff (rechts)
 
@@ -107,11 +138,27 @@ blau = komplett reviewt, grau = nur unstaged/untracked.
 | `a`       | Zwischen Hunk- und Zeilen-Modus togglen   |
 | `v`       | Multi-Line-Select (Visual Mode)           |
 | `space`   | Hunk / Zeile / Auswahl als reviewed togglen |
+| `S` / `ctrl+space` | Hunk / Zeile / Auswahl als überflogen togglen |
 | `s`       | Hunk / Zeile / Auswahl stagen bzw. unstagen (Toggle) |
 | `esc`     | Visual verlassen (zurück in Hunk-Modus) bzw. zurück zum Dateibaum |
 | `g` / `G` | Anfang / Ende                             |
 
 ## Diff-Fenster
+
+Links läuft eine Zeilennummern-Spalte mit: Kontext- und `+`-Zeilen
+zeigen die Zeilennummer der neuen Datei, `-`-Zeilen die der alten.
+Die Nummern sind immer im Zustand der Zeile eingefärbt (grün gestaged,
+rot entfernt, blau reviewed, violett überflogen …) — unabhängig vom
+Syntax-Highlighting.
+
+`H` toggled Syntax-Highlighting für den Code (via
+[chroma](https://github.com/alecthomas/chroma), Lexer nach Dateiendung;
+standardmäßig an). Ist es aktiv, wird der Zeileninhalt nach Sprache
+eingefärbt und nur der `+`/`-`-Marker links (plus die Zeilennummern)
+trägt die Diff-/Review-Farbe. Die Zeile unter dem Cursor, Visual-
+Auswahlen und Suchtreffer fallen auf die klassische Diff-Färbung
+zurück, damit Auswahl und Treffer sichtbar bleiben. `H` schaltet
+komplett auf die alte Volltext-Färbung zurück.
 
 Rechts am Rand zeigt eine Scrollbar Position und Größe des sichtbaren
 Ausschnitts, sobald der Diff nicht komplett auf den Schirm passt. Mit
@@ -151,6 +198,35 @@ Zeilen: 10-14
 
 Im Diff wird der Zeilenbereich der aktuellen Auswahl (Hunk, Zeile oder
 Visual-Range) mitgenommen; im Dateibaum entfällt die `Zeilen:`-Angabe.
+
+## Markier-Menü (`m`) & permanente Markierungen
+
+`space`/`S` bleiben die Schnell-Markierungen für einzelne Dateien. `m`
+öffnet auf der ausgewählten Datei **oder einem Ordner** ein Popup mit
+vier Optionen (`j`/`k` wählen, `enter` bestätigt, `esc` bricht ab):
+
+1. **reviewed** — wie `space`; bei einem Ordner für alle Dateien
+   darunter (alles gesetzt → alles wieder entfernt).
+2. **skimmed** — wie `S`, ebenfalls auch für Ordner.
+3. **permanently reviewed** — pfadbasiert statt content-adressiert:
+   Datei bzw. der ganze Ordner gilt dauerhaft als reviewed, **auch nach
+   künftigen Änderungen**. Für generierte Dateien/Ordner, die implizit
+   reviewed sind (Lockfiles, Snapshots, Vendor-Code …).
+4. **permanently skimmed** — dasselbe als überflogen (violett). Für
+   Dateien/Ordner mit begrenztem Impact, die man bedenkenlos
+   durchwinken kann.
+
+Permanent markierte Dateien und Ordner tragen im Baum ein `∞` hinter
+dem Namen — auch alles, was die Markierung von einem Elternordner erbt.
+
+Das Menü ist ein Single-Select: Ein `✓` zeigt den einen gerade aktiven
+Zustand (permanente Marks überdecken dabei Content-Marks). Die gleiche
+Option erneut bestätigen entfernt die Markierung; eine andere wählen
+wechselt den Zustand (z.B. ersetzt „reviewed" eine permanente
+Markierung). Permanente Markierungen
+wirken überall (Baum, Prozentanzeige, Diff-Färbung, `revu check`) und
+liegen als Pfade in `.revu/reviewed.json`
+(`permanentReviewed`/`permanentSkimmed`).
 
 ## Dateien vom Review ausschließen
 

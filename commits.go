@@ -30,8 +30,9 @@ func (c *Commit) Counts(st *Store) (int, int) {
 	return rev, tot
 }
 
-// ToggleReviewed flips review state for every changed line of the commit.
-func (c *Commit) ToggleReviewed(st *Store) string {
+// ToggleReviewed flips review state for every changed line of the
+// commit; skim toggles the skimmed mark instead.
+func (c *Commit) ToggleReviewed(st *Store, skim bool) string {
 	var ids []string
 	all := true
 	for _, f := range c.Files {
@@ -40,7 +41,7 @@ func (c *Commit) ToggleReviewed(st *Store) string {
 		}
 		if f.Binary && f.BinaryID != "" {
 			ids = append(ids, f.BinaryID)
-			if !st.Has(f.BinaryID) {
+			if !st.In(f.BinaryID, skim) {
 				all = false
 			}
 		}
@@ -48,7 +49,7 @@ func (c *Commit) ToggleReviewed(st *Store) string {
 			for _, l := range h.Lines {
 				if l.Origin == '+' || l.Origin == '-' {
 					ids = append(ids, l.ID)
-					if !st.Has(l.ID) {
+					if !st.In(l.ID, skim) {
 						all = false
 					}
 				}
@@ -59,12 +60,22 @@ func (c *Commit) ToggleReviewed(st *Store) string {
 		return "commit has no reviewable lines"
 	}
 	for _, id := range ids {
-		st.Set(id, !all)
+		st.Mark(id, skim, !all)
 	}
 	if err := st.Save(); err != nil {
 		return "failed to save review state: " + err.Error()
 	}
 	return ""
+}
+
+// AnySkimmed reports whether any counted line of the commit is skimmed.
+func (c *Commit) AnySkimmed(st *Store) bool {
+	for _, f := range c.Files {
+		if f.AnySkimmed(st) {
+			return true
+		}
+	}
+	return false
 }
 
 // Entry flattens all files of the commit into one entry for the diff pane.
@@ -212,6 +223,8 @@ func (cl *CommitList) View(w, h int, store *Store, focused bool, query string) s
 		switch {
 		case tot == 0:
 			st = stDim
+		case rev == tot && c.AnySkimmed(store):
+			st = stSkimmed
 		case rev == tot:
 			st = stReviewed
 		case rev > 0:

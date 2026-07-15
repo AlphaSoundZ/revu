@@ -64,6 +64,7 @@ type FileEntry struct {
 	Excluded  bool   // matches an exclude pattern; ignored by review accounting
 	BlobID    string // new-side blob hash from the diff header (binaries)
 	BinaryID  string // synthetic review ID for binary files
+	FileID    string // whole-file review ID (FILES view), hashes path + content
 }
 
 // parseUnifiedDiff parses `git diff` / `gh pr diff` output.
@@ -153,50 +154,81 @@ func assignIDs(f *FileEntry) {
 }
 
 // Counts returns reviewed/total changed lines across reviewable hunks.
-// Excluded files count as 0/0 everywhere.
+// Excluded files count as 0/0 everywhere; a permanent mark on the file
+// (or a parent folder) counts everything as reviewed.
 func (f *FileEntry) Counts(st *Store) (int, int) {
 	if f.Excluded {
 		return 0, 0
 	}
-	if f.Binary {
+	rev, tot := 0, 0
+	switch {
+	case f.FileID != "":
+		tot = 1
+		if st.Has(f.FileID) {
+			rev = 1
+		}
+	case f.Binary:
 		if !f.Staged || f.BinaryID == "" {
 			return 0, 0
 		}
+		tot = 1
 		if st.Has(f.BinaryID) {
-			return 1, 1
+			rev = 1
 		}
-		return 0, 1
-	}
-	rev, tot := 0, 0
-	for _, h := range f.Hunks {
-		if !h.Reviewable {
-			continue
-		}
-		for _, l := range h.Lines {
-			if l.Origin == '+' || l.Origin == '-' {
-				tot++
-				if st.Has(l.ID) {
-					rev++
+	default:
+		for _, h := range f.Hunks {
+			if !h.Reviewable {
+				continue
+			}
+			for _, l := range h.Lines {
+				if l.Origin == '+' || l.Origin == '-' {
+					tot++
+					if st.Has(l.ID) {
+						rev++
+					}
 				}
 			}
 		}
+	}
+	if _, ok := st.Permanent(f.Path); ok {
+		rev = tot
 	}
 	return rev, tot
 }
 
 // ToggleAllReviewed flips review state for every reviewable line of the
-// file. Returns a status message when nothing could be toggled.
-func (f *FileEntry) ToggleAllReviewed(st *Store) string {
+// file; skim toggles the skimmed mark instead. Returns a status message
+// when nothing could be toggled.
+func (f *FileEntry) ToggleAllReviewed(st *Store, skim bool) string {
 	if f.Excluded {
 		return "file is excluded from review (.revu/config.json)"
 	}
-	var ids []string
+	ids := reviewableIDs(f)
+	if len(ids) == 0 {
+		return "only staged files can be marked as reviewed"
+	}
 	all := true
+	for _, id := range ids {
+		if !st.In(id, skim) {
+			all = false
+			break
+		}
+	}
+	for _, id := range ids {
+		st.Mark(id, skim, !all)
+	}
+	if err := st.Save(); err != nil {
+		return "failed to save review state: " + err.Error()
+	}
+	return ""
+}
+
+// reviewableIDs returns the ids space/S may toggle: the binary unit and
+// the changed lines of reviewable hunks.
+func reviewableIDs(f *FileEntry) []string {
+	var ids []string
 	if f.Binary && f.Staged && f.BinaryID != "" {
 		ids = append(ids, f.BinaryID)
-		if !st.Has(f.BinaryID) {
-			all = false
-		}
 	}
 	for _, h := range f.Hunks {
 		if !h.Reviewable {
@@ -205,22 +237,65 @@ func (f *FileEntry) ToggleAllReviewed(st *Store) string {
 		for _, l := range h.Lines {
 			if l.Origin == '+' || l.Origin == '-' {
 				ids = append(ids, l.ID)
-				if !st.Has(l.ID) {
-					all = false
-				}
 			}
 		}
 	}
-	if len(ids) == 0 {
-		return "only staged files can be marked as reviewed"
+	return ids
+}
+
+// entryIDs returns every review ID an entry carries: the line IDs of all
+// hunks (staged or not) plus the binary ID.
+func entryIDs(e *FileEntry) []string {
+	if e == nil {
+		return nil
 	}
-	for _, id := range ids {
-		st.Set(id, !all)
+	var ids []string
+	if e.BinaryID != "" {
+		ids = append(ids, e.BinaryID)
 	}
-	if err := st.Save(); err != nil {
-		return "failed to save review state: " + err.Error()
+	for _, h := range e.Hunks {
+		for _, l := range h.Lines {
+			if l.ID != "" {
+				ids = append(ids, l.ID)
+			}
+		}
 	}
-	return ""
+	return ids
+}
+
+// AnySkimmed reports whether any counted line (or the binary unit) of
+// the file is marked as skimmed.
+func (f *FileEntry) AnySkimmed(st *Store) bool {
+	if f.Excluded {
+		return false
+	}
+	if skim, ok := st.Permanent(f.Path); ok {
+		return skim // a permanent mark overrides line-level skims
+	}
+	if f.FileID != "" {
+		return st.Skimmed(f.FileID)
+	}
+	if f.Binary {
+		return f.Staged && st.Skimmed(f.BinaryID)
+	}
+	for _, h := range f.Hunks {
+		if !h.Reviewable {
+			continue
+		}
+		if hunkAnySkimmed(h, st) {
+			return true
+		}
+	}
+	return false
+}
+
+func hunkAnySkimmed(h *Hunk, st *Store) bool {
+	for _, l := range h.Lines {
+		if (l.Origin == '+' || l.Origin == '-') && st.Skimmed(l.ID) {
+			return true
+		}
+	}
+	return false
 }
 
 func hunkCounts(h *Hunk, st *Store) (int, int) {
