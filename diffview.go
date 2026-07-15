@@ -132,17 +132,52 @@ func (d *DiffView) Bottom() {
 	}
 }
 
-// Scroll moves the viewport without moving the cursor; the view stops
-// following the cursor until the next cursor movement.
-func (d *DiffView) Scroll(delta int) {
-	if len(d.rows) == 0 {
+// Align scrolls the view so the current selection (hunk, line or visual
+// range) sits at the top (zt, pos -1), middle (zz, 0) or bottom (zb, 1).
+// Scrolling may run past the end — missing rows render as blank lines —
+// so aligning to the top works everywhere in the file.
+func (d *DiffView) Align(pos int) {
+	if len(d.sels) == 0 {
 		return
 	}
 	h := d.h
 	if h <= 0 {
 		h = 20
 	}
-	d.scroll = clamp(d.scroll+delta, 0, max(0, len(d.rows)-h))
+	lo := d.sels[d.cursor]
+	hi := lo
+	if d.visual {
+		l, r := d.cursor, d.anchor
+		if l > r {
+			l, r = r, l
+		}
+		lo, hi = d.sels[l], d.sels[r]
+	} else if !d.lineMode {
+		for hi+1 < len(d.rows) && d.rows[hi+1].kind == rowLine && d.rows[hi+1].hunk == d.rows[lo].hunk {
+			hi++
+		}
+	}
+	var target int
+	switch pos {
+	case -1:
+		target = lo
+	case 1:
+		target = hi - h + 1
+	default:
+		target = (lo+hi)/2 - h/2
+	}
+	d.scroll = clamp(target, 0, max(0, len(d.rows)-1))
+	d.free = true // keep the position until the cursor moves
+}
+
+// Scroll moves the viewport without moving the cursor; the view stops
+// following the cursor until the next cursor movement. Like in vim the
+// view can scroll until the last row sits at the top.
+func (d *DiffView) Scroll(delta int) {
+	if len(d.rows) == 0 {
+		return
+	}
+	d.scroll = clamp(d.scroll+delta, 0, max(0, len(d.rows)-1))
 	d.free = true
 }
 
@@ -435,7 +470,8 @@ func parseNewStart(header string) int {
 func (d *DiffView) ensureVisible(h int) {
 	maxScroll := max(0, len(d.rows)-h)
 	if d.free {
-		d.scroll = clamp(d.scroll, 0, maxScroll)
+		// free-scrolled positions (J/K, zt/zz/zb) may overshoot the end
+		d.scroll = clamp(d.scroll, 0, max(0, len(d.rows)-1))
 		return
 	}
 	if len(d.sels) == 0 {
@@ -590,7 +626,7 @@ func (d *DiffView) View(w, h int, focused bool, query string) string {
 		tw = w - 1
 		thumbH = max(1, h*h/n)
 		if maxScroll := n - h; maxScroll > 0 {
-			barTop = d.scroll * (h - thumbH) / maxScroll
+			barTop = min(d.scroll, maxScroll) * (h - thumbH) / maxScroll
 		}
 	}
 	curRow, curHunk := -1, -1
@@ -617,17 +653,21 @@ func (d *DiffView) View(w, h int, focused bool, query string) string {
 		r := d.rows[i]
 		st := d.rowStyle(r)
 		highlight := false
+		bg := ""
 		if focused {
 			switch {
 			case d.visual && i >= visLo && i <= visHi:
 				st = st.Background(colVisualBg)
 				highlight = true
+				bg = seqVisualBg
 			case d.lineMode && i == curRow:
 				st = st.Background(colCursorBg)
 				highlight = true
+				bg = seqCursorBg
 			case !d.lineMode && curHunk >= 0 && r.kind != rowInfo && r.hunk == curHunk:
 				st = st.Background(colCursorBg)
 				highlight = true
+				bg = seqCursorBg
 			}
 		}
 		if gutW > 0 {
@@ -635,17 +675,19 @@ func (d *DiffView) View(w, h int, focused bool, query string) string {
 		}
 		text := truncate(expandTabs(r.text), cw)
 		matched := query != "" && strings.Contains(strings.ToLower(text), strings.ToLower(query))
-		// syntax-colored code lines carry their own ANSI sequences, so
-		// cursor/visual background and search highlighting fall back to
-		// the plain state-colored rendering
+		// with syntax on the whole file is colored; with syntax off only
+		// the selected rows are. The cursor/visual background survives
+		// chroma's resets by re-applying it after each one. Search
+		// matches stay plain so their highlight is visible.
 		done := false
-		if d.syntax && r.kind == rowLine && !highlight && !matched && text != "" {
+		if r.kind == rowLine && !matched && text != "" && (d.syntax || highlight) {
 			if code, ok := highlightLine(d.hunkPath(r), text[1:]); ok {
+				if bg != "" {
+					code = bg + strings.ReplaceAll(code, "\x1b[0m", "\x1b[0m"+bg) + "\x1b[0m"
+				}
 				b.WriteString(st.Render(text[:1]) + code)
-				if showBar {
-					if pad := cw - len([]rune(text)); pad > 0 {
-						b.WriteString(strings.Repeat(" ", pad))
-					}
+				if pad := cw - len([]rune(text)); pad > 0 && (showBar || highlight) {
+					b.WriteString(st.Render(strings.Repeat(" ", pad)))
 				}
 				done = true
 			}

@@ -1,11 +1,25 @@
 package main
 
 import (
+	"fmt"
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 )
+
+// ansiBg converts a #RRGGBB color to a raw SGR background sequence, for
+// re-applying a background inside chroma-styled text (whose resets would
+// otherwise clear it).
+func ansiBg(c lipgloss.Color) string {
+	s := string(c)
+	if len(s) != 7 || s[0] != '#' {
+		return ""
+	}
+	var r, g, b int
+	fmt.Sscanf(s[1:], "%02x%02x%02x", &r, &g, &b)
+	return fmt.Sprintf("\x1b[48;2;%d;%d;%dm", r, g, b)
+}
 
 func clamp(v, lo, hi int) int {
 	if v < lo {

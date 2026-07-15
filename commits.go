@@ -175,6 +175,23 @@ func (cl *CommitList) Current() *Commit {
 	return cl.commits[cl.cursor]
 }
 
+// Align scrolls so the cursor row sits at the top (pos -1), middle (0)
+// or bottom (1) of the h rows tall view; the end may scroll past, blank
+// lines fill the rest.
+func (cl *CommitList) Align(h, pos int) {
+	if h < 1 {
+		h = 1
+	}
+	target := cl.cursor - h/2
+	switch pos {
+	case -1:
+		target = cl.cursor
+	case 1:
+		target = cl.cursor - h + 1
+	}
+	cl.scroll = clamp(target, 0, cl.cursor)
+}
+
 func (cl *CommitList) Move(delta int) {
 	if len(cl.commits) == 0 {
 		return

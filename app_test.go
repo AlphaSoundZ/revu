@@ -1566,7 +1566,9 @@ func TestLineNumbersAndSyntaxToggle(t *testing.T) {
 	if a.diff.syntax {
 		t.Fatal("H should turn syntax highlighting off")
 	}
-	// plain rendering shows the single-column gutter inline with the text
+	// with syntax off the selection still gets syntax colors, so check
+	// the gutter on the unfocused (plain) rendering
+	key(a, "esc")
 	view := a.View()
 	if !strings.Contains(view, "  1  line1") {
 		t.Fatal("context line should carry the new-file line number")
@@ -1708,5 +1710,121 @@ func TestMarkPopup(t *testing.T) {
 	view := a.View()
 	if !strings.Contains(view, "revu · keybindings") || !strings.Contains(view, "[LOCAL]") {
 		t.Fatal("help should overlay the screen, keeping the background visible")
+	}
+}
+
+func TestSyntaxHighlightModes(t *testing.T) {
+	root := setupRepo(t)
+	os.WriteFile(filepath.Join(root, "code.go"),
+		[]byte("package main\n\nfunc foo() int { return 1 }\n"), 0o644)
+	a := newTestApp(t, root)
+
+	// rows: src/ deep/ b.txt a.txt code.go untracked.txt
+	for i := 0; i < 4; i++ {
+		key(a, "j")
+	}
+	if n := a.localTree.Current(); n == nil || n.Path != "code.go" {
+		t.Fatalf("cursor should be on code.go, got %+v", n)
+	}
+	// syntax on: everything is colored, focused or not
+	unfoc := a.diff.View(100, 30, false, "")
+	full := strings.Count(unfoc, "\x1b[38;2")
+	if full == 0 {
+		t.Fatal("with syntax on the preview should be fully colored")
+	}
+	key(a, "enter")
+	key(a, "a") // line mode: cursor on the first line
+	foc := a.diff.View(100, 30, true, "")
+	if got := strings.Count(foc, "\x1b[38;2"); got != full {
+		t.Fatalf("with syntax on focus must not change coloring, got %d of %d sequences", got, full)
+	}
+	if !strings.Contains(foc, seqCursorBg) {
+		t.Fatal("selected line should keep the cursor background")
+	}
+
+	// syntax off: only the selection is colored
+	key(a, "H")
+	foc = a.diff.View(100, 30, true, "")
+	sel := strings.Count(foc, "\x1b[38;2")
+	if sel == 0 || sel >= full {
+		t.Fatalf("with syntax off only the selection should be colored, got %d of %d sequences", sel, full)
+	}
+	if !strings.Contains(foc, seqCursorBg) {
+		t.Fatal("selected line should still carry the cursor background")
+	}
+	// unfocused with syntax off: nothing is colored
+	if got := strings.Count(a.diff.View(100, 30, false, ""), "\x1b[38;2"); got != 0 {
+		t.Fatalf("unfocused with syntax off should be plain, got %d sequences", got)
+	}
+}
+
+func TestCenterWithZZ(t *testing.T) {
+	root := setupRepo(t)
+	var big strings.Builder
+	for i := 1; i <= 200; i++ {
+		fmt.Fprintf(&big, "line %d\n", i)
+	}
+	os.WriteFile(filepath.Join(root, "big.txt"), []byte(big.String()), 0o644)
+	a := newTestApp(t, root)
+
+	// rows: src/ deep/ b.txt a.txt big.txt untracked.txt
+	for i := 0; i < 4; i++ {
+		key(a, "j")
+	}
+	if n := a.localTree.Current(); n == nil || n.Path != "big.txt" {
+		t.Fatalf("cursor should be on big.txt, got %+v", n)
+	}
+	key(a, "enter")
+	key(a, "a") // line mode
+	a.View()    // sets the rendered diff height
+	d := a.diff
+	d.cursor = 100
+	key(a, "z")
+	if !a.zPending || d.scroll != 0 {
+		t.Fatal("a single z must only arm the chord")
+	}
+	key(a, "z")
+	if a.zPending {
+		t.Fatal("zz should complete the chord")
+	}
+	want := clamp(d.sels[100]-d.h/2, 0, len(d.rows)-1)
+	if d.scroll != want {
+		t.Fatalf("zz should center the cursor row: want scroll %d, got %d", want, d.scroll)
+	}
+	if !d.free {
+		t.Fatal("zz should hold the centered position")
+	}
+
+	// zt puts the line at the top, zb at the bottom
+	key(a, "z")
+	key(a, "t")
+	if d.scroll != d.sels[100] {
+		t.Fatalf("zt should scroll the cursor row to the top: want %d, got %d", d.sels[100], d.scroll)
+	}
+	key(a, "z")
+	key(a, "b")
+	if want := d.sels[100] - d.h + 1; d.scroll != want {
+		t.Fatalf("zb should scroll the cursor row to the bottom: want %d, got %d", want, d.scroll)
+	}
+
+	// zt works at the end of the file: the view overscrolls, blank
+	// lines fill the rest instead of stopping at len-h
+	key(a, "G")
+	key(a, "z")
+	key(a, "t")
+	last := d.sels[len(d.sels)-1]
+	if d.scroll != last {
+		t.Fatalf("zt at the end should overscroll: want %d, got %d", last, d.scroll)
+	}
+	a.View() // rendering must not clamp the overscroll away
+	if d.scroll != last {
+		t.Fatalf("render clamped the overscroll: want %d, got %d", last, d.scroll)
+	}
+
+	// an interposed key cancels the chord
+	key(a, "z")
+	key(a, "j")
+	if a.zPending {
+		t.Fatal("another key should cancel a pending z")
 	}
 }

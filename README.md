@@ -101,6 +101,7 @@ blau = komplett reviewt, grau = nur unstaged/untracked.
 | `/`         | Suchen (enter: bestätigen, esc: abbrechen)    |
 | `n` / `N`   | Nächster / vorheriger Treffer                 |
 | `<` / `>`   | An den Anfang / ans Ende springen             |
+| `z z` / `z t` / `z b` | Zeile / Selektion mittig, oben, unten ausrichten (scrollt notfalls über das Ende hinaus) |
 | `{` / `}`   | Diff-Kontext um eine Zeile verkleinern / vergrößern |
 | `+`         | Aktives Fenster zwischen Fullscreen/Split togglen |
 | `e`         | Datei im `$EDITOR` öffnen (springt zur Zeile) |
@@ -152,13 +153,18 @@ rot entfernt, blau reviewed, violett überflogen …) — unabhängig vom
 Syntax-Highlighting.
 
 `H` toggled Syntax-Highlighting für den Code (via
-[chroma](https://github.com/alecthomas/chroma), Lexer nach Dateiendung;
-standardmäßig an). Ist es aktiv, wird der Zeileninhalt nach Sprache
-eingefärbt und nur der `+`/`-`-Marker links (plus die Zeilennummern)
-trägt die Diff-/Review-Farbe. Die Zeile unter dem Cursor, Visual-
-Auswahlen und Suchtreffer fallen auf die klassische Diff-Färbung
-zurück, damit Auswahl und Treffer sichtbar bleiben. `H` schaltet
-komplett auf die alte Volltext-Färbung zurück.
+[chroma](https://github.com/alecthomas/chroma), Lexer nach Dateiendung).
+Zwei Modi:
+
+- **an** (Default): der gesamte Diff wird nach Sprache eingefärbt —
+  auch die Selektion, die dabei ihren Cursor-/Visual-Hintergrund
+  behält. Nur der `+`/`-`-Marker links (plus die Zeilennummern) trägt
+  die Diff-/Review-Farbe.
+- **aus**: klassische Diff-Färbung; nur die gerade selektierten Zeilen
+  (Hunk, Zeile oder Visual-Range) bekommen Syntax-Farben.
+
+Suchtreffer werden immer klassisch gefärbt, damit das
+Treffer-Highlight sichtbar bleibt.
 
 Rechts am Rand zeigt eine Scrollbar Position und Größe des sichtbaren
 Ausschnitts, sobald der Diff nicht komplett auf den Schirm passt. Mit

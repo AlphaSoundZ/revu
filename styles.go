@@ -38,6 +38,9 @@ var (
 	stSearchCur = lipgloss.NewStyle().Background(colSearchCurBg).Foreground(lipgloss.Color("#ECEFF4"))
 	stBarTrack  = lipgloss.NewStyle().Foreground(colBorderU)
 	stBarThumb  = lipgloss.NewStyle().Foreground(colDim)
+
+	seqCursorBg = ansiBg(colCursorBg)
+	seqVisualBg = ansiBg(colVisualBg)
 )
 
 // dirStyle picks the tree color for a folder from its aggregated content:

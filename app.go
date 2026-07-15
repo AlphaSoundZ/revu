@@ -101,6 +101,8 @@ type App struct {
 	markNode *Node // file or folder the popup is about
 	markSel  int   // selected option
 
+	zPending bool // first z of a zz chord seen
+
 	searching   bool   // search bar open, typing
 	searchInput string // text being typed
 	searchQuery string // active query (highlights, n/N)
@@ -378,6 +380,22 @@ func (a *App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if a.markOpen {
 		return a.handleMarkKey(key)
 	}
+	if a.zPending {
+		a.zPending = false
+		switch key {
+		case "z":
+			a.alignCursor(0)
+		case "t":
+			a.alignCursor(-1)
+		case "b":
+			a.alignCursor(1)
+		}
+		return a, nil
+	}
+	if key == "z" {
+		a.zPending = true
+		return a, nil
+	}
 	switch key {
 	case "ctrl+c", "q":
 		return a, tea.Quit
@@ -396,9 +414,9 @@ func (a *App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "H":
 		a.diff.syntax = !a.diff.syntax
 		if a.diff.syntax {
-			a.status = "syntax highlighting on"
+			a.status = "syntax highlighting: everything"
 		} else {
-			a.status = "syntax highlighting off"
+			a.status = "syntax highlighting: selection only"
 		}
 		return a, nil
 	case "ctrl+d", "pgdown":
@@ -749,6 +767,26 @@ func (a *App) handleTreeKey(key string) (tea.Model, tea.Cmd) {
 		return a, loadLocalCmd(a.root, a.context)
 	}
 	return a, nil
+}
+
+// alignCursor scrolls the focused pane so the cursor row sits at the
+// top (zt), middle (zz) or bottom (zb). The list panes render their
+// content h-4 rows tall (border, title, status bar).
+func (a *App) alignCursor(pos int) {
+	if a.focus == focusDiff {
+		a.diff.Align(pos)
+		return
+	}
+	h := max(1, a.h-4)
+	if a.view == viewCommits && a.commitOpen == nil {
+		if a.commitList != nil {
+			a.commitList.Align(h, pos)
+		}
+		return
+	}
+	if t := a.activeTree(); t != nil {
+		t.Align(h, pos)
+	}
 }
 
 // wholeFileIDs returns every ID a FILES-view mark covers. Marking a file
@@ -1384,11 +1422,12 @@ func (a *App) helpView() string {
 			{"J / K", "scroll the diff pane (from anywhere)"},
 			{"ctrl+d / ctrl+u", "half-page scroll the diff (from anywhere)"},
 			{"ctrl+o", "copy review prompt (file; + line range in diff)"},
-			{"H", "toggle syntax highlighting in the diff"},
+			{"H", "toggle syntax highlighting (everything ↔ selection only)"},
 			{"{ / }", "shrink / grow diff context by one line"},
 			{"/", "search (enter: confirm, esc: cancel)"},
 			{"n / N", "next / previous search match"},
 			{"< / >", "jump to top / bottom"},
+			{"z z / z t / z b", "current line / selection to center, top, bottom"},
 			{"+", "toggle fullscreen for the active pane"},
 			{"e", "open file in $EDITOR"},
 			{"r", "reload current view"},

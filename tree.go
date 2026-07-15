@@ -164,6 +164,23 @@ func (t *TreeModel) Move(delta int) {
 	t.cursor = clamp(t.cursor+delta, 0, len(t.rows)-1)
 }
 
+// Align scrolls so the cursor row sits at the top (pos -1), middle (0)
+// or bottom (1) of the h rows tall view; the end may scroll past, blank
+// lines fill the rest.
+func (t *TreeModel) Align(h, pos int) {
+	if h < 1 {
+		h = 1
+	}
+	target := t.cursor - h/2
+	switch pos {
+	case -1:
+		target = t.cursor
+	case 1:
+		target = t.cursor - h + 1
+	}
+	t.scroll = clamp(target, 0, t.cursor)
+}
+
 func (t *TreeModel) SelectPath(p string) {
 	for i, r := range t.rows {
 		if r.node.Path == p {
