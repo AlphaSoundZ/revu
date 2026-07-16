@@ -64,6 +64,8 @@ func key(a *App, k string) {
 		msg = tea.KeyMsg{Type: tea.KeyCtrlO}
 	case "ctrl+@":
 		msg = tea.KeyMsg{Type: tea.KeyCtrlAt}
+	case "ctrl+x":
+		msg = tea.KeyMsg{Type: tea.KeyCtrlX}
 	default:
 		msg = tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(k)}
 	}
@@ -1826,5 +1828,159 @@ func TestCenterWithZZ(t *testing.T) {
 	key(a, "j")
 	if a.zPending {
 		t.Fatal("another key should cancel a pending z")
+	}
+}
+
+func TestReviewDocument(t *testing.T) {
+	root := setupRepo(t)
+	a := newTestApp(t, root)
+	var captured string
+	old := copyToClipboard
+	copyToClipboard = func(text string) error { captured = text; return nil }
+	defer func() { copyToClipboard = old }()
+
+	// i opens the editor in normal mode with nothing inserted; enter
+	// pastes the captured reference and switches to insert mode
+	key(a, "j")
+	key(a, "j") // src/deep/b.txt
+	key(a, "i")
+	if !a.reviewOpen || a.editor.insert {
+		t.Fatal("i should open the review editor in normal mode")
+	}
+	if got := a.editor.Text(); got != "" {
+		t.Fatalf("opening must not paste anything, got %q", got)
+	}
+	if a.reviewRef != "src/deep/b.txt" {
+		t.Fatalf("selection ref should be captured, got %q", a.reviewRef)
+	}
+	key(a, "enter")
+	if !a.editor.insert {
+		t.Fatal("enter should paste the ref and enter insert mode")
+	}
+	if got := a.editor.Text(); got != "src/deep/b.txt:\n" {
+		t.Fatalf("enter should paste the reference block, got %q", got)
+	}
+	if a.editor.row != 1 {
+		t.Fatalf("cursor should sit on the blank feedback line, got row %d", a.editor.row)
+	}
+	key(a, "rename this")
+	key(a, "esc") // insert -> normal
+	if a.editor.insert {
+		t.Fatal("esc should leave insert mode")
+	}
+	key(a, "esc") // normal -> save & close
+	if a.reviewOpen {
+		t.Fatal("esc in normal mode should close the popup")
+	}
+	data, err := os.ReadFile(filepath.Join(root, ".revu", "review.md"))
+	if err != nil || string(data) != "src/deep/b.txt:\nrename this\n" {
+		t.Fatalf("review doc should be saved, got %q (%v)", data, err)
+	}
+	key(a, "esc") // clear the status message so the hint bar shows
+	if !strings.Contains(a.View(), "✎") {
+		t.Fatal("status bar should flag a non-empty review doc")
+	}
+
+	// diff selection: the reference carries the line number
+	key(a, "enter") // focus diff on b.txt
+	key(a, "i")
+	key(a, "enter")
+	if got := a.editor.Text(); !strings.Contains(got, "src/deep/b.txt:2:") {
+		t.Fatalf("diff reference should carry the changed line, got %q", got)
+	}
+	key(a, "second note")
+	key(a, "esc")
+	key(a, "esc")
+
+	// vim editing: gg + dd + u round-trips
+	key(a, "i") // opens in normal mode
+	before := a.editor.Text()
+	key(a, "g")
+	key(a, "g")
+	key(a, "d")
+	key(a, "d")
+	if a.editor.Text() == before {
+		t.Fatal("dd should delete the first line")
+	}
+	key(a, "u")
+	if a.editor.Text() != before {
+		t.Fatal("u should undo the dd")
+	}
+	key(a, "esc")
+
+	// I copies the document framed as a fix-it prompt
+	key(a, "I")
+	if !strings.Contains(captured, "Behebe das folgende Review-Feedback") ||
+		!strings.Contains(captured, "src/deep/b.txt:\nrename this") ||
+		!strings.Contains(captured, "src/deep/b.txt:2:\nsecond note") {
+		t.Fatalf("I should copy the framed review doc, got %q", captured)
+	}
+
+	// ctrl+x clears the document
+	key(a, "ctrl+x")
+	if a.hasReview() {
+		t.Fatal("ctrl+x should clear the review doc")
+	}
+	key(a, "esc")
+	if strings.Contains(a.View(), "✎") {
+		t.Fatal("status flag should disappear after clearing")
+	}
+}
+
+func edKey(e *Editor, k string) {
+	var msg tea.KeyMsg
+	switch k {
+	case "esc":
+		msg = tea.KeyMsg{Type: tea.KeyEsc}
+	default:
+		msg = tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(k)}
+	}
+	e.HandleKey(msg)
+}
+
+func TestEditorChangeCommands(t *testing.T) {
+	e := NewEditor("hello world foo", 0, false)
+	e.col = 7 // inside "world"
+
+	// ciw replaces the word under the cursor
+	edKey(e, "c")
+	edKey(e, "i")
+	edKey(e, "w")
+	if !e.insert || e.Text() != "hello  foo" || e.col != 6 {
+		t.Fatalf("ciw should cut the inner word: got %q col %d insert %v", e.Text(), e.col, e.insert)
+	}
+	edKey(e, "there")
+	if e.Text() != "hello there foo" {
+		t.Fatalf("typing after ciw should replace the word, got %q", e.Text())
+	}
+
+	// cc clears the whole line and enters insert mode
+	edKey(e, "esc")
+	edKey(e, "c")
+	edKey(e, "c")
+	if !e.insert || e.Text() != "" || e.col != 0 {
+		t.Fatalf("cc should clear the line: got %q col %d insert %v", e.Text(), e.col, e.insert)
+	}
+	edKey(e, "rewritten")
+	if e.Text() != "rewritten" {
+		t.Fatalf("typing after cc should rewrite the line, got %q", e.Text())
+	}
+
+	// both are single undo units
+	edKey(e, "esc")
+	edKey(e, "u")
+	if e.Text() != "hello there foo" {
+		t.Fatalf("u should undo the cc, got %q", e.Text())
+	}
+	edKey(e, "u")
+	if e.Text() != "hello world foo" {
+		t.Fatalf("second u should undo the ciw, got %q", e.Text())
+	}
+
+	// an aborted chord (c + unrelated key) does nothing
+	edKey(e, "c")
+	edKey(e, "x")
+	if e.Text() != "hello world foo" || e.insert {
+		t.Fatalf("aborted c chord must not edit, got %q", e.Text())
 	}
 }

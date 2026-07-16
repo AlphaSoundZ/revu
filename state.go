@@ -40,13 +40,21 @@ func LoadStore(root string) (*Store, error) {
 	return s, nil
 }
 
-func (s *Store) Save() error {
-	if err := os.MkdirAll(s.dir, 0o755); err != nil {
+// ensureRevuDir creates <repo>/.revu with a .gitignore that hides it.
+func ensureRevuDir(dir string) error {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
-	gi := filepath.Join(s.dir, ".gitignore")
+	gi := filepath.Join(dir, ".gitignore")
 	if _, err := os.Stat(gi); err != nil {
 		_ = os.WriteFile(gi, []byte("*\n"), 0o644)
+	}
+	return nil
+}
+
+func (s *Store) Save() error {
+	if err := ensureRevuDir(s.dir); err != nil {
+		return err
 	}
 	data, err := json.MarshalIndent(s, "", "  ")
 	if err != nil {

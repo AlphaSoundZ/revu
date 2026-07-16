@@ -191,6 +191,30 @@ ungestagte Änderungen, steht ein zusätzliches `M` davor (`MM datei.ts`).
 Ordner färben sich nach ihrem aggregierten Inhalt: blau wenn alles
 darin reviewt ist, orange wenn nur ein Teil, sonst weiß (`#ECEFF4`).
 
+## Review-Dokument (`i`)
+
+`i` öffnet ein Inline-Popup mit dem persistenten Review-Dokument
+(`.revu/review.md`) im Normal-Mode — ohne etwas einzufügen, man kann
+das Dokument also auch nur lesen oder bearbeiten. Die aktuelle Auswahl
+wird beim Öffnen gemerkt; erst `enter` (im Normal-Mode) hängt ihre
+Referenz an — `datei:zeilen:` aus dem Diff (Hunk, Zeile oder
+Visual-Range) bzw. der Pfad aus dem Dateibaum — und springt in den
+Insert-Mode auf die Leerzeile darunter; dort schreibt man sein
+Feedback. Die Fußzeile des Popups zeigt, welche Referenz `enter`
+einfügen würde. Das Dokument wächst über mehrere Aufrufe, bis man es
+leert.
+
+Der Editor ist modal mit einem vim-Subset: `esc` wechselt in den
+Normal-Mode, dort navigiert man mit `h j k l`, `w b e`, `0 ^ $`,
+`gg`/`G`, editiert mit `x`, `dd`, `cc`, `ciw`, `p`, `o`/`O`, `i a A I`
+und macht mit `u` rückgängig. `esc` im Normal-Mode speichert und
+schließt das Popup.
+
+- `I` kopiert das Dokument als Prompt in die Zwischenablage — mit der
+  Anweisung vorweg, all dieses Feedback zu beheben.
+- `ctrl+x` leert das Dokument.
+- Ein `✎` in der Statusleiste zeigt, dass Feedback vorliegt.
+
 ## Review-Prompt (`ctrl+o`)
 
 `ctrl+o` kopiert einen Prompt in die Zwischenablage, z.B. für eine KI

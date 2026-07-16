@@ -101,6 +101,10 @@ type App struct {
 	markNode *Node // file or folder the popup is about
 	markSel  int   // selected option
 
+	reviewOpen bool    // review popup (i) is showing
+	reviewRef  string  // selection ref captured when the popup opened
+	editor     *Editor // inline editor for the review document
+
 	zPending bool // first z of a zz chord seen
 
 	searching   bool   // search bar open, typing
@@ -380,6 +384,19 @@ func (a *App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if a.markOpen {
 		return a.handleMarkKey(key)
 	}
+	if a.reviewOpen {
+		if key == "ctrl+c" {
+			return a, tea.Quit
+		}
+		if key == "enter" && !a.editor.insert {
+			a.insertReviewRef()
+			return a, nil
+		}
+		if a.editor.HandleKey(msg) {
+			a.saveReview()
+		}
+		return a, nil
+	}
 	if a.zPending {
 		a.zPending = false
 		switch key {
@@ -410,6 +427,15 @@ func (a *App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return a, nil
 	case "ctrl+o":
 		a.copyReviewPrompt()
+		return a, nil
+	case "i":
+		a.openReview()
+		return a, nil
+	case "I":
+		a.copyReviewDoc()
+		return a, nil
+	case "ctrl+x":
+		a.clearReviewDoc()
 		return a, nil
 	case "H":
 		a.diff.syntax = !a.diff.syntax
@@ -1186,6 +1212,11 @@ func (a *App) openEditor() tea.Cmd {
 		a.status = "no file selected"
 		return nil
 	}
+	return editorCmd(a.root, filepath.Join(a.root, path), line)
+}
+
+// editorCmd opens $EDITOR on the file, jumping to line when supported.
+func editorCmd(root, abs string, line int) tea.Cmd {
 	ed := os.Getenv("EDITOR")
 	if ed == "" {
 		ed = "vim"
@@ -1196,10 +1227,125 @@ func (a *App) openEditor() tea.Cmd {
 	if line > 0 && supportsPlusLine(name) {
 		args = append(args, fmt.Sprintf("+%d", line))
 	}
-	args = append(args, filepath.Join(a.root, path))
+	args = append(args, abs)
 	c := exec.Command(name, args...)
-	c.Dir = a.root
+	c.Dir = root
 	return tea.ExecProcess(c, func(error) tea.Msg { return editorDoneMsg{} })
+}
+
+// reviewFile is the persistent review document: selection references
+// with feedback below each, kept until cleared with ctrl+x.
+func (a *App) reviewFile() string {
+	return filepath.Join(a.root, ".revu", "review.md")
+}
+
+func (a *App) hasReview() bool {
+	fi, err := os.Stat(a.reviewFile())
+	return err == nil && fi.Size() > 0
+}
+
+// selectionRef renders the current selection as "path:lines" — the file
+// and line range in the diff pane, the node path in the tree.
+func (a *App) selectionRef() string {
+	if a.focus == focusDiff && a.diff.entry != nil {
+		ref := a.diff.CurrentFilePath()
+		if lo, hi := a.diff.SelectionRange(); lo > 0 {
+			if lo == hi {
+				ref += fmt.Sprintf(":%d", lo)
+			} else {
+				ref += fmt.Sprintf(":%d-%d", lo, hi)
+			}
+		}
+		return ref
+	}
+	if t := a.activeTree(); t != nil {
+		if n := t.Current(); n != nil {
+			return n.Path
+		}
+	}
+	return ""
+}
+
+// openReview opens the inline editor on the review document, in normal
+// mode with nothing inserted; the current selection reference is only
+// captured — enter pastes it (see insertReviewRef).
+func (a *App) openReview() {
+	a.reviewRef = a.selectionRef()
+	old, _ := os.ReadFile(a.reviewFile())
+	a.editor = NewEditor(strings.TrimRight(string(old), "\n"), 1<<30, false)
+	a.reviewOpen = true
+}
+
+// insertReviewRef appends the captured selection reference and puts the
+// cursor on the blank feedback line below it, in insert mode.
+func (a *App) insertReviewRef() {
+	if a.reviewRef == "" {
+		return
+	}
+	e := a.editor
+	e.pushUndo()
+	text := strings.TrimRight(e.Text(), " \t\n")
+	if text != "" {
+		text += "\n\n"
+	}
+	text += a.reviewRef + ":\n" // trailing newline yields the blank feedback line
+	e.setText(text)
+	e.row = len(e.lines) - 1
+	e.col = 0
+	e.insert = true
+}
+
+// saveReview persists the editor buffer and closes the popup; an empty
+// buffer removes the document.
+func (a *App) saveReview() {
+	a.reviewOpen = false
+	text := strings.TrimRight(a.editor.Text(), " \t\n")
+	path := a.reviewFile()
+	if text == "" {
+		_ = os.Remove(path)
+		a.status = "review document is empty"
+		return
+	}
+	if err := ensureRevuDir(filepath.Dir(path)); err != nil {
+		a.status = err.Error()
+		return
+	}
+	if err := os.WriteFile(path, []byte(text+"\n"), 0o644); err != nil {
+		a.status = err.Error()
+		return
+	}
+	a.status = "review saved · I copies it as a prompt"
+}
+
+// copyReviewDoc puts the review document on the clipboard, framed as a
+// prompt asking to fix all of the feedback.
+func (a *App) copyReviewDoc() {
+	data, err := os.ReadFile(a.reviewFile())
+	doc := strings.TrimSpace(string(data))
+	if err != nil || doc == "" {
+		a.status = "review document is empty (press i to add feedback)"
+		return
+	}
+	text := "Behebe das folgende Review-Feedback. Jeder Abschnitt beginnt mit" +
+		" der Stelle als `datei:zeilen:`, darunter steht das Feedback dazu:\n\n" +
+		doc + "\n"
+	if err := copyToClipboard(text); err != nil {
+		a.status = "copy failed: " + err.Error()
+		return
+	}
+	a.status = "copied review document as prompt"
+}
+
+func (a *App) clearReviewDoc() {
+	if !a.hasReview() {
+		a.status = "review document is already empty"
+		return
+	}
+	if err := os.Remove(a.reviewFile()); err != nil {
+		a.status = err.Error()
+		return
+	}
+	a.status = "review document cleared"
 }
 
 func supportsPlusLine(ed string) bool {
@@ -1238,8 +1384,32 @@ func (a *App) View() string {
 		return overlay(screen, a.helpView(), a.w, a.h)
 	case a.markOpen:
 		return overlay(screen, a.markView(), a.w, a.h)
+	case a.reviewOpen:
+		return overlay(screen, a.reviewView(), a.w, a.h)
 	}
 	return screen
+}
+
+func (a *App) reviewView() string {
+	w := clamp(a.w-16, 40, 96)
+	h := clamp(a.h-10, 6, 24)
+	mode := "NORMAL"
+	hints := "esc save & close · hjkl w b e 0 ^ $ gg G · x dd cc ciw p o O · u undo · i insert"
+	if a.reviewRef != "" {
+		hints = "enter: add " + a.reviewRef + " · " + hints
+	}
+	if a.editor.insert {
+		mode = "INSERT"
+		hints = "esc: normal mode"
+	}
+	title := stTitle.Render("review.md") + stDim.Render(" · "+mode)
+	// pad the hint line to the editor width so the box keeps its size
+	// when the (shorter) insert-mode hint is shown
+	return lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(colBorderF).
+		Padding(0, 1).
+		Render(title + "\n" + a.editor.View(w, h) + "\n" + stDim.Render(padRight(truncate(hints, w), w)))
 }
 
 // viewTabs renders all view names, bracketing the active one.
@@ -1422,6 +1592,9 @@ func (a *App) helpView() string {
 			{"J / K", "scroll the diff pane (from anywhere)"},
 			{"ctrl+d / ctrl+u", "half-page scroll the diff (from anywhere)"},
 			{"ctrl+o", "copy review prompt (file; + line range in diff)"},
+			{"i", "open the review doc; enter pastes the selection ref"},
+			{"I", "copy the review doc as a fix-it prompt"},
+			{"ctrl+x", "clear the review doc"},
 			{"H", "toggle syntax highlighting (everything ↔ selection only)"},
 			{"{ / }", "shrink / grow diff context by one line"},
 			{"/", "search (enter: confirm, esc: cancel)"},
@@ -1516,5 +1689,9 @@ func (a *App) statusBar() string {
 	if a.searchQuery != "" {
 		search = " /" + a.searchQuery
 	}
-	return stStatus.Render(truncate(fmt.Sprintf(" [%s ctx:%d%s] %s", viewName, a.context, search, hints), a.w))
+	rev := ""
+	if a.hasReview() {
+		rev = " ✎"
+	}
+	return stStatus.Render(truncate(fmt.Sprintf(" [%s ctx:%d%s%s] %s", viewName, a.context, search, rev, hints), a.w))
 }
