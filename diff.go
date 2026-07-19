@@ -263,30 +263,40 @@ func entryIDs(e *FileEntry) []string {
 	return ids
 }
 
-// AnySkimmed reports whether any counted line (or the binary unit) of
-// the file is marked as skimmed.
+// unitIDs returns the ids that make up the file's review state: the
+// whole-file unit, the binary unit or the reviewable line ids.
+func unitIDs(f *FileEntry) []string {
+	if f.FileID != "" {
+		return []string{f.FileID}
+	}
+	return reviewableIDs(f)
+}
+
+// AnySkimmed reports whether the file reads as skimmed. Explicit marks
+// refine a permanent default: when every counted unit carries its own
+// mark those decide, otherwise the permanent mark does.
 func (f *FileEntry) AnySkimmed(st *Store) bool {
 	if f.Excluded {
 		return false
 	}
+	ids := unitIDs(f)
+	all := len(ids) > 0
+	anySkim := false
+	for _, id := range ids {
+		if !st.Has(id) {
+			all = false
+		}
+		if st.Skimmed(id) {
+			anySkim = true
+		}
+	}
 	if skim, ok := st.Permanent(f.Path); ok {
-		return skim // a permanent mark overrides line-level skims
-	}
-	if f.FileID != "" {
-		return st.Skimmed(f.FileID)
-	}
-	if f.Binary {
-		return f.Staged && st.Skimmed(f.BinaryID)
-	}
-	for _, h := range f.Hunks {
-		if !h.Reviewable {
-			continue
+		if all {
+			return anySkim
 		}
-		if hunkAnySkimmed(h, st) {
-			return true
-		}
+		return skim
 	}
-	return false
+	return anySkim
 }
 
 func hunkAnySkimmed(h *Hunk, st *Store) bool {

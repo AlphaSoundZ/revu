@@ -445,6 +445,15 @@ func (a *App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			a.status = "syntax highlighting: selection only"
 		}
 		return a, nil
+	case "ctrl+w":
+		a.diff.smart = !a.diff.smart
+		a.diff.rebuild()
+		if a.diff.smart {
+			a.status = "clean diff: whitespace-only hunks hidden, word-level changes"
+		} else {
+			a.status = "clean diff off"
+		}
+		return a, nil
 	case "ctrl+d", "pgdown":
 		a.diff.Scroll(max(1, a.diff.h/2))
 		return a, nil
@@ -887,7 +896,9 @@ func (a *App) markAllIn(n *Node, skim bool) bool {
 // applyMark executes a mark-popup choice for a file or folder node:
 // 0 reviewed, 1 skimmed (content-addressed, like space/S on a file),
 // 2/3 the permanent variants (path-based, survive content changes).
-// Choosing an already-active option removes the mark again.
+// Choosing an already-active option removes the mark again. Content
+// marks layer on top of a permanent mark without removing it — manual
+// overrides never drop the file's permanent marking.
 func (a *App) applyMark(n *Node, opt int) {
 	if n == nil {
 		return
@@ -897,10 +908,6 @@ func (a *App) applyMark(n *Node, opt int) {
 		a.store.SetPermanent(n.Path, skim, !a.store.PermanentAt(n.Path, skim))
 	} else {
 		v := !a.markAllIn(n, skim)
-		if a.store.PermanentAt(n.Path, false) || a.store.PermanentAt(n.Path, true) {
-			v = true // switching from a permanent mark: set, don't toggle off
-			a.store.SetPermanent(n.Path, skim, false)
-		}
 		var ids []string
 		for _, e := range entriesUnder(n) {
 			if e.Excluded {
@@ -950,18 +957,18 @@ func (a *App) handleMarkKey(key string) (tea.Model, tea.Cmd) {
 }
 
 // markState returns the option currently in effect for the node, -1 for
-// none. Exactly one state is reported: permanent marks shadow content
-// marks, so the popup reads as a single-select menu.
+// none. Exactly one state is reported: fully explicit content marks win,
+// otherwise a permanent mark shows as the active default.
 func (a *App) markState(n *Node) int {
 	switch {
-	case a.store.PermanentAt(n.Path, true):
-		return 3
-	case a.store.PermanentAt(n.Path, false):
-		return 2
 	case a.markAllIn(n, true):
 		return 1
 	case a.markAllIn(n, false):
 		return 0
+	case a.store.PermanentAt(n.Path, true):
+		return 3
+	case a.store.PermanentAt(n.Path, false):
+		return 2
 	}
 	return -1
 }
@@ -1596,6 +1603,7 @@ func (a *App) helpView() string {
 			{"I", "copy the review doc as a fix-it prompt"},
 			{"ctrl+x", "clear the review doc"},
 			{"H", "toggle syntax highlighting (everything ↔ selection only)"},
+			{"ctrl+w", "clean diff: hide ws-only hunks, word-level changes"},
 			{"{ / }", "shrink / grow diff context by one line"},
 			{"/", "search (enter: confirm, esc: cancel)"},
 			{"n / N", "next / previous search match"},

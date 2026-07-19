@@ -66,6 +66,8 @@ func key(a *App, k string) {
 		msg = tea.KeyMsg{Type: tea.KeyCtrlAt}
 	case "ctrl+x":
 		msg = tea.KeyMsg{Type: tea.KeyCtrlX}
+	case "ctrl+w":
+		msg = tea.KeyMsg{Type: tea.KeyCtrlW}
 	default:
 		msg = tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(k)}
 	}
@@ -1689,23 +1691,40 @@ func TestMarkPopup(t *testing.T) {
 		t.Fatalf("folder review should use line marks, got %d", len(a.store.Lines))
 	}
 
-	// single-select: a permanent mark shadows the content marks...
+	// manual overrides layer on top of a permanent mark: marking the
+	// folder reviewed must not remove its permanent skim
 	key(a, "m")
-	key(a, "j")
-	key(a, "j")
-	key(a, "enter") // permanently reviewed on src/
-	if got := a.markState(n); got != 2 {
-		t.Fatalf("permanent mark should be the single active state, got %d", got)
+	key(a, "enter") // clear the content marks from the block above
+	key(a, "m")
+	key(a, "k")
+	key(a, "enter") // option 4: permanently skimmed on src/
+	if !a.store.PermanentAt("src", true) {
+		t.Fatal("permanent skim should be set on src")
 	}
-	// ...and switching back to "reviewed" replaces the permanent mark
+	if !b.AnySkimmed(a.store) {
+		t.Fatal("b.txt should default to skimmed via the folder mark")
+	}
 	key(a, "m")
-	key(a, "enter")
-	if a.store.PermanentAt("src", false) {
-		t.Fatal("choosing reviewed should clear the permanent mark")
+	key(a, "enter") // option 1: reviewed — the explicit override
+	if !a.store.PermanentAt("src", true) {
+		t.Fatal("overriding with reviewed must not remove the permanent mark")
+	}
+	if b.AnySkimmed(a.store) {
+		t.Fatal("explicit reviewed marks should win over the permanent skim")
 	}
 	if got := a.markState(n); got != 0 {
-		t.Fatalf("reviewed should be the single active state, got %d", got)
+		t.Fatalf("fully explicit marks should show as the active state, got %d", got)
 	}
+	// removing the override falls back to the permanent default
+	key(a, "m")
+	key(a, "enter")
+	if !b.AnySkimmed(a.store) || !a.store.PermanentAt("src", true) {
+		t.Fatal("clearing the override should fall back to the permanent skim")
+	}
+	if got := a.markState(n); got != 3 {
+		t.Fatalf("permanent skim should show as the active state again, got %d", got)
+	}
+	a.store.SetPermanent("src", true, false)
 
 	// the help popup is an overlay too
 	key(a, "?")
@@ -1982,5 +2001,178 @@ func TestEditorChangeCommands(t *testing.T) {
 	edKey(e, "x")
 	if e.Text() != "hello world foo" || e.insert {
 		t.Fatalf("aborted c chord must not edit, got %q", e.Text())
+	}
+}
+
+func TestCleanDiffMode(t *testing.T) {
+	root := setupRepo(t)
+	os.WriteFile(filepath.Join(root, "ws.txt"), []byte("hello world\n"), 0o644)
+	os.WriteFile(filepath.Join(root, "word.txt"), []byte("hello world\n"), 0o644)
+	os.WriteFile(filepath.Join(root, "word2.txt"), []byte("hello brave world\n"), 0o644)
+	gitT(t, root, "add", "ws.txt", "word.txt", "word2.txt")
+	gitT(t, root, "commit", "-qm", "seed")
+	os.WriteFile(filepath.Join(root, "ws.txt"), []byte("  hello   world\n"), 0o644)
+	os.WriteFile(filepath.Join(root, "word.txt"), []byte("hello brave world\n"), 0o644)
+	os.WriteFile(filepath.Join(root, "word2.txt"), []byte("hello world\n"), 0o644)
+	a := newTestApp(t, root)
+
+	rows := func() []dRow { return a.diff.rows }
+	pair := func() (rem, add *dRow) {
+		for i := range a.diff.rows {
+			r := &a.diff.rows[i]
+			if r.kind != rowLine {
+				continue
+			}
+			switch r.text[0] {
+			case '-':
+				rem = r
+			case '+':
+				add = r
+			}
+		}
+		return
+	}
+
+	// rows: src/ deep/ b.txt a.txt untracked.txt word.txt word2.txt ws.txt
+	for i := 0; i < 7; i++ {
+		key(a, "j")
+	}
+	if n := a.localTree.Current(); n == nil || n.Path != "ws.txt" {
+		t.Fatalf("cursor should be on ws.txt, got %+v", n)
+	}
+	if len(rows()) < 3 {
+		t.Fatal("without clean mode the ws-only hunk should be shown")
+	}
+	key(a, "ctrl+w")
+	if len(rows()) != 1 || rows()[0].kind != rowInfo || !strings.Contains(rows()[0].text, "hidden") {
+		t.Fatalf("clean mode should hide the ws-only hunk, got %+v", rows())
+	}
+
+	// word2.txt (pure deletion): the - line stays, red span on "brave "
+	key(a, "k")
+	if n := a.localTree.Current(); n == nil || n.Path != "word2.txt" {
+		t.Fatalf("cursor should be on word2.txt, got %+v", n)
+	}
+	rem, add := pair()
+	if rem == nil || !rem.wd || rem.wdLo != 6 || rem.wdHi != 12 {
+		t.Fatalf("pure deletion must keep the - line with its span, got %+v", rem)
+	}
+	if add == nil || !add.wd || add.wdLo != add.wdHi {
+		t.Fatalf("added side of a pure deletion should have an empty span, got %+v", add)
+	}
+
+	// word.txt (insertion): the deleted line is hidden, the added line
+	// carries the word-diff span for "brave "
+	key(a, "k")
+	if n := a.localTree.Current(); n == nil || n.Path != "word.txt" {
+		t.Fatalf("cursor should be on word.txt, got %+v", n)
+	}
+	rem, add = pair()
+	if rem != nil {
+		t.Fatalf("the deleted line should be hidden in clean mode, got %+v", rem)
+	}
+	if add == nil || !add.wd || add.wdLo != 6 || add.wdHi != 12 {
+		t.Fatalf("added side should span \"brave \", got %+v", add)
+	}
+	// clean mode also suppresses full-file syntax highlighting
+	if v := a.diff.View(100, 30, false, ""); strings.Contains(v, "\x1b[38;2") {
+		t.Fatal("clean mode should render without syntax colors")
+	}
+
+	// in line mode the deleted line reappears (selectable for marking)
+	key(a, "enter")
+	key(a, "a")
+	rem, _ = pair()
+	if rem == nil || !rem.wd || rem.wdLo != 6 || rem.wdHi != 6 {
+		t.Fatalf("line mode should show the deleted line with its span, got %+v", rem)
+	}
+	key(a, "a")
+	key(a, "esc") // back to the tree
+
+	// toggling back restores the full diff
+	key(a, "ctrl+w")
+	if a.diff.smart {
+		t.Fatal("second ctrl+w should switch clean mode off")
+	}
+	rem, add = pair()
+	if rem == nil || add == nil || rem.wd || add.wd {
+		t.Fatal("word-diff should be gone with clean mode off")
+	}
+}
+
+func TestDiffLineWrap(t *testing.T) {
+	root := setupRepo(t)
+	long := strings.Repeat("abcdefghij", 12) // 120 chars
+	os.WriteFile(filepath.Join(root, "long.txt"), []byte(long+"\n"), 0o644)
+	a := newTestApp(t, root)
+
+	// rows: src/ deep/ b.txt a.txt long.txt untracked.txt
+	for i := 0; i < 4; i++ {
+		key(a, "j")
+	}
+	if n := a.localTree.Current(); n == nil || n.Path != "long.txt" {
+		t.Fatalf("cursor should be on long.txt, got %+v", n)
+	}
+	key(a, "H") // selection-only syntax: plain rendering below
+	view := a.diff.View(40, 20, false, "")
+	if strings.Contains(view, "…") {
+		t.Fatal("long lines should wrap, not truncate")
+	}
+	// w=40, gutter 4 -> 36 content: header + marker+35 code, then 35-char
+	// continuations: 35+35+35+15 = 120
+	rows := strings.Split(view, "\n")
+	if len(rows) != 5 {
+		t.Fatalf("want 1 header + 4 wrapped lines, got %d: %q", len(rows), view)
+	}
+	if !strings.Contains(view, long[105:]) {
+		t.Fatal("the tail of the wrapped line should be visible")
+	}
+	for i, r := range rows[2:] {
+		if !strings.HasPrefix(r, "     ") {
+			t.Fatalf("continuation %d should carry a blank gutter, got %q", i, r)
+		}
+	}
+	// the viewport still fills at most h screen lines
+	if got := strings.Count(a.diff.View(40, 3, false, ""), "\n") + 1; got != 3 {
+		t.Fatalf("wrapped rendering must clip at the pane height, got %d lines", got)
+	}
+}
+
+func TestCommitOverrideKeepsPermanentMark(t *testing.T) {
+	root := setupRepo(t)
+	a := newTestApp(t, root)
+	a.store.SetPermanent("src/deep/b.txt", true, true) // e.g. "always skimmed"
+	a.store.Save()
+
+	_, cmd := a.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("2")})
+	a.Update(cmd())
+	if a.commitsErr != "" {
+		t.Fatal("commits load failed:", a.commitsErr)
+	}
+	c := a.commitList.Current()
+	cb := findEntry(c.Files, "src/deep/b.txt")
+	if !cb.AnySkimmed(a.store) {
+		t.Fatal("without overrides the file should read skimmed via the permanent mark")
+	}
+
+	// space marks the whole commit reviewed — the manual override
+	key(a, " ")
+	if !a.store.PermanentAt("src/deep/b.txt", true) {
+		t.Fatal("reviewing the commit must not remove the permanent file mark")
+	}
+	if cb.AnySkimmed(a.store) {
+		t.Fatal("the explicit review should win over the permanent skim")
+	}
+	if rev, tot := c.Counts(a.store); rev != tot || tot == 0 {
+		t.Fatalf("commit should be fully reviewed, got %d/%d", rev, tot)
+	}
+
+	// clearing the override falls back to the permanent skim
+	key(a, " ")
+	if !cb.AnySkimmed(a.store) || !a.store.PermanentAt("src/deep/b.txt", true) {
+		t.Fatal("clearing the override should fall back to the permanent mark")
+	}
+	if rev, tot := cb.Counts(a.store); rev != tot {
+		t.Fatalf("permanent default should still count as reviewed, got %d/%d", rev, tot)
 	}
 }

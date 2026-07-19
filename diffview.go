@@ -23,6 +23,11 @@ type dRow struct {
 	text string
 	oldN int // old-file line number, 0 = not on that side
 	newN int // new-file line number, 0 = not on that side
+	// word-diff of a lone -/+ pair (smart mode): the changed part of the
+	// expanded content as rune offsets, marker excluded. An empty span
+	// (pure insertion/deletion on the other side) renders as context.
+	wd         bool
+	wdLo, wdHi int
 }
 
 // DiffView renders one file's diff and tracks the hunk/line cursor,
@@ -41,6 +46,7 @@ type DiffView struct {
 	free      bool  // free-scrolled via J/K; suspends cursor-follow
 	searchRow int   // row of the current search match, -1 when none
 	syntax    bool  // syntax-highlight code lines (H toggles)
+	smart     bool  // ctrl+w: hide ws-only hunks, word-level diffs
 	numW      int   // width of one line-number column
 }
 
@@ -69,11 +75,33 @@ func (d *DiffView) rebuild() {
 		return
 	}
 	maxN := 1
+	hidden := 0
 	for hi, h := range d.entry.Hunks {
+		if d.smart && wsOnlyHunk(h) {
+			hidden++
+			continue
+		}
 		d.rows = append(d.rows, dRow{kind: rowHunkHeader, hunk: hi, line: -1, text: h.Header})
 		if !d.lineMode {
 			d.sels = append(d.sels, len(d.rows)-1)
 		}
+		wdRem, wdAdd := -1, -1 // line indices of a lone -/+ pair
+		var remSpan, addSpan [2]int
+		if d.smart {
+			wdRem, wdAdd = singleChange(h)
+			if wdRem >= 0 {
+				oldT := []rune(expandTabs(h.Lines[wdRem].Text))
+				newT := []rune(expandTabs(h.Lines[wdAdd].Text))
+				p, s := commonAffixes(oldT, newT)
+				remSpan = [2]int{p, len(oldT) - s}
+				addSpan = [2]int{p, len(newT) - s}
+			}
+		}
+		// the deleted side is implied by the word diff, so hide it — but
+		// not for pure deletions (nothing green on the + side would make
+		// the change invisible) and not in line mode, where individual
+		// lines must stay selectable for marking and staging
+		hideRem := wdRem >= 0 && !d.lineMode && addSpan[1] > addSpan[0]
 		oldN, newN := parseOldStart(h.Header), parseNewStart(h.Header)
 		if oldN == 0 && newN == 0 {
 			oldN, newN = 1, 1 // untracked / FILES preview: synthetic headers
@@ -98,11 +126,24 @@ func (d *DiffView) rebuild() {
 			if r.newN > maxN {
 				maxN = r.newN
 			}
+			switch li {
+			case wdRem:
+				r.wd, r.wdLo, r.wdHi = true, remSpan[0], remSpan[1]
+			case wdAdd:
+				r.wd, r.wdLo, r.wdHi = true, addSpan[0], addSpan[1]
+			}
+			if li == wdRem && hideRem {
+				continue // counters above stay correct
+			}
 			d.rows = append(d.rows, r)
 			if d.lineMode && (l.Origin == '+' || l.Origin == '-') {
 				d.sels = append(d.sels, len(d.rows)-1)
 			}
 		}
+	}
+	if hidden > 0 {
+		d.rows = append(d.rows, dRow{kind: rowInfo, hunk: -1, line: -1,
+			text: fmt.Sprintf("(%d whitespace-only hunk(s) hidden · ctrl+w shows them)", hidden)})
 	}
 	d.numW = max(3, len(strconv.Itoa(maxN)))
 	if len(d.sels) == 0 {
@@ -505,6 +546,72 @@ func (d *DiffView) ensureVisible(h int) {
 	d.scroll = clamp(d.scroll, 0, maxScroll)
 }
 
+// wsOnlyHunk reports whether the hunk's changes only reshuffle
+// whitespace (re-indents, re-wraps): the changed lines are identical
+// once every whitespace character is removed.
+func wsOnlyHunk(h *Hunk) bool {
+	strip := func(s string) string {
+		var b strings.Builder
+		for _, r := range s {
+			if r != ' ' && r != '\t' && r != '\r' {
+				b.WriteRune(r)
+			}
+		}
+		return b.String()
+	}
+	var oldB, newB strings.Builder
+	changed := false
+	for _, l := range h.Lines {
+		switch l.Origin {
+		case '-':
+			changed = true
+			oldB.WriteString(strip(l.Text))
+		case '+':
+			changed = true
+			newB.WriteString(strip(l.Text))
+		}
+	}
+	return changed && oldB.String() == newB.String()
+}
+
+// singleChange returns the line indices of the hunk's lone -/+ pair, or
+// -1,-1 when the hunk changes more than one line on either side.
+func singleChange(h *Hunk) (int, int) {
+	rem, add := -1, -1
+	for i, l := range h.Lines {
+		switch l.Origin {
+		case '-':
+			if rem >= 0 {
+				return -1, -1
+			}
+			rem = i
+		case '+':
+			if add >= 0 {
+				return -1, -1
+			}
+			add = i
+		}
+	}
+	if rem < 0 || add < 0 {
+		return -1, -1
+	}
+	return rem, add
+}
+
+// commonAffixes returns the length of the common prefix and suffix of
+// two rune slices; the suffix never overlaps the prefix.
+func commonAffixes(a, b []rune) (int, int) {
+	p := 0
+	for p < len(a) && p < len(b) && a[p] == b[p] {
+		p++
+	}
+	s := 0
+	for s < len(a)-p && s < len(b)-p && a[len(a)-1-s] == b[len(b)-1-s] {
+		s++
+	}
+	return p, s
+}
+
 // gutter renders the line-number column: the new-file number, falling
 // back to the old-file number for deleted lines (blank for header/info
 // rows).
@@ -534,14 +641,6 @@ func (d *DiffView) hunkPath(r dRow) string {
 func (d *DiffView) rowStyle(r dRow) lipgloss.Style {
 	switch r.kind {
 	case rowInfo:
-		if d.entry.Binary {
-			if skim, ok := d.store.Permanent(d.entry.Path); ok {
-				if skim {
-					return stSkimmed
-				}
-				return stReviewed
-			}
-		}
 		id := d.entry.BinaryID
 		if d.entry.FileID != "" {
 			id = d.entry.FileID
@@ -552,11 +651,27 @@ func (d *DiffView) rowStyle(r dRow) lipgloss.Style {
 			}
 			return stReviewed
 		}
+		if d.entry.Binary {
+			if skim, ok := d.store.Permanent(d.entry.Path); ok {
+				if skim {
+					return stSkimmed
+				}
+				return stReviewed
+			}
+		}
 		return stDim
 	case rowHunkHeader:
 		h := d.entry.Hunks[r.hunk]
 		if !h.Reviewable || d.entry.Excluded {
 			return stDim.Bold(true)
+		}
+		rev, tot := hunkCounts(h, d.store)
+		// fully explicit marks win; the permanent mark is the default
+		if tot > 0 && rev == tot {
+			if hunkAnySkimmed(h, d.store) {
+				return stSkimmed.Bold(true)
+			}
+			return stReviewed.Bold(true)
 		}
 		if skim, ok := d.store.Permanent(d.hunkPath(r)); ok {
 			if skim {
@@ -564,16 +679,13 @@ func (d *DiffView) rowStyle(r dRow) lipgloss.Style {
 			}
 			return stReviewed.Bold(true)
 		}
-		rev, tot := hunkCounts(h, d.store)
 		switch {
-		case tot > 0 && rev == tot && hunkAnySkimmed(h, d.store):
-			return stSkimmed.Bold(true)
-		case tot > 0 && rev == tot:
-			return stReviewed.Bold(true)
 		case rev > 0:
 			return stPartial.Bold(true)
 		default:
-			return stStaged.Bold(true)
+			// gray, not green: a green header is hard to tell apart
+			// from the green added lines right below it
+			return stDim.Bold(true)
 		}
 	default:
 		h := d.entry.Hunks[r.hunk]
@@ -582,6 +694,13 @@ func (d *DiffView) rowStyle(r dRow) lipgloss.Style {
 			return stContext
 		}
 		reviewable := h.Reviewable && !d.entry.Excluded
+		// an explicit line mark wins; the permanent mark is the default
+		if reviewable && d.store.Has(l.ID) {
+			if d.store.Skimmed(l.ID) {
+				return stSkimmed
+			}
+			return stReviewed
+		}
 		if reviewable {
 			if skim, ok := d.store.Permanent(d.hunkPath(r)); ok {
 				if skim {
@@ -589,12 +708,6 @@ func (d *DiffView) rowStyle(r dRow) lipgloss.Style {
 				}
 				return stReviewed
 			}
-		}
-		if reviewable && d.store.Has(l.ID) {
-			if d.store.Skimmed(l.ID) {
-				return stSkimmed
-			}
-			return stReviewed
 		}
 		if !reviewable {
 			if l.Origin == '-' {
@@ -648,8 +761,35 @@ func (d *DiffView) View(w, h int, focused bool, query string) string {
 		gutW, cw = 0, tw // pane too narrow for a gutter
 	}
 	var b strings.Builder
-	end := min(len(d.rows), d.scroll+h)
-	for i := d.scroll; i < end; i++ {
+	lines := 0
+	// writeLine finishes one screen line: pads (with the row style when
+	// highlighted so the background extends) and draws the scrollbar.
+	writeLine := func(content string, vis int, st lipgloss.Style, highlight bool) {
+		if lines > 0 {
+			b.WriteByte('\n')
+		}
+		b.WriteString(content)
+		if pad := tw - vis; pad > 0 {
+			switch {
+			case highlight:
+				b.WriteString(st.Render(strings.Repeat(" ", pad)))
+			case showBar:
+				b.WriteString(strings.Repeat(" ", pad))
+			}
+		}
+		if showBar {
+			if lines >= barTop && lines < barTop+thumbH {
+				b.WriteString(stBarThumb.Render("█"))
+			} else {
+				b.WriteString(stBarTrack.Render("│"))
+			}
+		}
+		lines++
+	}
+	lq := strings.ToLower(query)
+	// rows longer than the pane wrap onto continuation lines (blank
+	// gutter, blank marker column) instead of being truncated
+	for i := d.scroll; i < n && lines < h; i++ {
 		r := d.rows[i]
 		st := d.rowStyle(r)
 		highlight := false
@@ -670,48 +810,92 @@ func (d *DiffView) View(w, h int, focused bool, query string) string {
 				bg = seqCursorBg
 			}
 		}
+		hl := stSearch
+		if i == d.searchRow {
+			hl = stSearchCur // the current n/N match
+		}
+		full := []rune(expandTabs(r.text))
+		matched := query != "" && strings.Contains(strings.ToLower(string(full)), lq)
+		// smart mode paints only the changed part of a lone -/+ pair
+		// red/green, the rest like context. With syntax on the whole
+		// file is colored; with syntax off only the selected rows are;
+		// clean mode suppresses the whole-file coloring so the word-diff
+		// colors stand out. Search matches stay plain so their highlight
+		// is visible.
+		useWd := d.smart && r.wd && !highlight && !matched && r.kind == rowLine
+		useSyn := !useWd && r.kind == rowLine && !matched && ((d.syntax && !d.smart) || highlight)
+		gut := ""
 		if gutW > 0 {
-			b.WriteString(st.Render(d.gutter(r)))
+			gut = d.gutter(r)
 		}
-		text := truncate(expandTabs(r.text), cw)
-		matched := query != "" && strings.Contains(strings.ToLower(text), strings.ToLower(query))
-		// with syntax on the whole file is colored; with syntax off only
-		// the selected rows are. The cursor/visual background survives
-		// chroma's resets by re-applying it after each one. Search
-		// matches stay plain so their highlight is visible.
-		done := false
-		if r.kind == rowLine && !matched && text != "" && (d.syntax || highlight) {
-			if code, ok := highlightLine(d.hunkPath(r), text[1:]); ok {
-				if bg != "" {
-					code = bg + strings.ReplaceAll(code, "\x1b[0m", "\x1b[0m"+bg) + "\x1b[0m"
+		for off, first := 0, true; lines < h; first = false {
+			width := cw
+			if !first {
+				width = cw - 1 // continuation lines skip the marker column
+			}
+			if width < 1 {
+				width = 1
+			}
+			seg := full[off:min(off+width, len(full))]
+			var line strings.Builder
+			vis := 0
+			if gutW > 0 {
+				if first {
+					line.WriteString(st.Render(gut))
+				} else {
+					line.WriteString(st.Render(strings.Repeat(" ", gutW)))
 				}
-				b.WriteString(st.Render(text[:1]) + code)
-				if pad := cw - len([]rune(text)); pad > 0 && (showBar || highlight) {
-					b.WriteString(st.Render(strings.Repeat(" ", pad)))
+				vis += gutW
+			}
+			if !first {
+				line.WriteString(st.Render(" "))
+				vis++
+			}
+			code := seg
+			if first && r.kind == rowLine && len(seg) > 0 {
+				code = seg[1:] // the origin marker keeps the row style
+			}
+			switch {
+			case useWd:
+				codeOff := off - 1
+				if first {
+					line.WriteString(st.Render(string(seg[:1])))
+					vis++
+					codeOff = 0
 				}
-				done = true
+				lo := clamp(r.wdLo-codeOff, 0, len(code))
+				hi := clamp(r.wdHi-codeOff, lo, len(code))
+				segSt := stStaged
+				if r.text[0] == '-' {
+					segSt = stRemoved
+				}
+				line.WriteString(stContext.Render(string(code[:lo])) +
+					segSt.Render(string(code[lo:hi])) +
+					stContext.Render(string(code[hi:])))
+				vis += len(code)
+			case useSyn:
+				if first {
+					line.WriteString(st.Render(string(seg[:1])))
+					vis++
+				}
+				if colored, ok := highlightLine(d.hunkPath(r), string(code)); ok {
+					if bg != "" {
+						colored = bg + strings.ReplaceAll(colored, "\x1b[0m", "\x1b[0m"+bg) + "\x1b[0m"
+					}
+					line.WriteString(colored)
+				} else {
+					line.WriteString(highlightMatches(string(code), query, st, hl))
+				}
+				vis += len(code)
+			default:
+				line.WriteString(highlightMatches(string(seg), query, st, hl))
+				vis += len(seg)
 			}
-		}
-		if !done {
-			if highlight || showBar {
-				text = padRight(text, cw)
+			writeLine(line.String(), vis, st, highlight)
+			off += len(seg)
+			if off >= len(full) {
+				break
 			}
-			hl := stSearch
-			if i == d.searchRow {
-				hl = stSearchCur // the current n/N match
-			}
-			b.WriteString(highlightMatches(text, query, st, hl))
-		}
-		if showBar {
-			slot := i - d.scroll
-			if slot >= barTop && slot < barTop+thumbH {
-				b.WriteString(stBarThumb.Render("█"))
-			} else {
-				b.WriteString(stBarTrack.Render("│"))
-			}
-		}
-		if i < end-1 {
-			b.WriteByte('\n')
 		}
 	}
 	return b.String()

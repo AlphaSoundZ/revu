@@ -98,6 +98,7 @@ blau = komplett reviewt, grau = nur unstaged/untracked.
 | `ctrl+d` / `ctrl+u` | Diff halbe Seite scrollen (aus jeder View, auch PgDn/PgUp) |
 | `ctrl+o`    | Review-Prompt kopieren (im Diff mit Zeilenbereich) |
 | `H`         | Syntax-Highlighting im Diff togglen           |
+| `ctrl+w`    | Clean Diff: Whitespace-Hunks ausblenden, Wort-Diff |
 | `/`         | Suchen (enter: bestätigen, esc: abbrechen)    |
 | `n` / `N`   | Nächster / vorheriger Treffer                 |
 | `<` / `>`   | An den Anfang / ans Ende springen             |
@@ -146,6 +147,10 @@ blau = komplett reviewt, grau = nur unstaged/untracked.
 
 ## Diff-Fenster
 
+Zeilen, die breiter als das Fenster sind, werden umgebrochen und laufen
+in Fortsetzungszeilen weiter (mit leerer Nummern-Spalte) statt mit `…`
+abgeschnitten zu werden.
+
 Links läuft eine Zeilennummern-Spalte mit: Kontext- und `+`-Zeilen
 zeigen die Zeilennummer der neuen Datei, `-`-Zeilen die der alten.
 Die Nummern sind immer im Zustand der Zeile eingefärbt (grün gestaged,
@@ -165,6 +170,20 @@ Zwei Modi:
 
 Suchtreffer werden immer klassisch gefärbt, damit das
 Treffer-Highlight sichtbar bleibt.
+
+`ctrl+w` toggled den **Clean-Diff-Modus**:
+
+- Hunks, deren Änderungen nur Whitespace/Formatierung betreffen
+  (Re-Indent, Umbrüche — die Zeilen sind ohne Whitespace identisch),
+  werden ausgeblendet; eine gedimmte Zeile am Ende zeigt, wie viele.
+- Besteht die Änderung eines Hunks aus genau einer `-`/`+`-Zeile, wird
+  nur der tatsächlich geänderte Teil der Zeile rot bzw. grün gefärbt
+  (gemeinsamer Präfix/Suffix bleibt kontextfarben). Die `-`-Zeile wird
+  dabei ausgeblendet — außer bei reinen Löschungen (sonst wäre die
+  Änderung unsichtbar) und im Zeilen-Modus, wo sie für Markieren und
+  Stagen selektierbar bleiben muss.
+- Syntax-Highlighting ist in diesem Modus unterdrückt, damit die
+  Wort-Diff-Farben klar hervorstechen (die Selektion behält ihres).
 
 Rechts am Rand zeigt eine Scrollbar Position und Größe des sichtbaren
 Ausschnitts, sobald der Diff nicht komplett auf den Schirm passt. Mit
@@ -249,11 +268,18 @@ vier Optionen (`j`/`k` wählen, `enter` bestätigt, `esc` bricht ab):
 Permanent markierte Dateien und Ordner tragen im Baum ein `∞` hinter
 dem Namen — auch alles, was die Markierung von einem Elternordner erbt.
 
-Das Menü ist ein Single-Select: Ein `✓` zeigt den einen gerade aktiven
-Zustand (permanente Marks überdecken dabei Content-Marks). Die gleiche
-Option erneut bestätigen entfernt die Markierung; eine andere wählen
-wechselt den Zustand (z.B. ersetzt „reviewed" eine permanente
-Markierung). Permanente Markierungen
+Das Menü ist ein Single-Select: Ein `✓` zeigt den gerade wirksamen
+Zustand. Die gleiche Option erneut bestätigen entfernt die Markierung.
+
+Permanente Markierungen sind ein **Default, den man übersteuern kann**:
+Markiert man Zeilen, Hunks, Commits oder Dateien einer permanent
+markierten Datei manuell (z.B. im COMMITS-Tab per `space` reviewed,
+obwohl die Datei permanent skimmed ist), gewinnen die expliziten Marks
+in der Anzeige — die permanente Datei-Markierung bleibt dabei
+**unangetastet** (das `∞` bleibt). Entfernt man die expliziten Marks
+wieder, fällt alles auf den permanenten Default zurück. Nur die
+Permanent-Optionen im `m`-Menü setzen bzw. entfernen die permanente
+Markierung selbst. Permanente Markierungen
 wirken überall (Baum, Prozentanzeige, Diff-Färbung, `revu check`) und
 liegen als Pfade in `.revu/reviewed.json`
 (`permanentReviewed`/`permanentSkimmed`).
